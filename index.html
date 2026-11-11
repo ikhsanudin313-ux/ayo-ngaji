@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0F6B4F">
+  <meta name="description" content="Ayo Ngaji — database jamaah, jadwal pengajian, absensi & capaian.">
+  <title>Ayo Ngaji</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <!-- Font & ikon dimuat tanpa menahan tampilan: bila CDN lambat/terblokir, aplikasi tetap terbuka -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" media="print" onload="this.media='all'">
+  <script>
+    /* Penjaga awal: tampilkan penyebab bila kode aplikasi gagal berjalan (mis. file JavaScript tidak tertempel utuh). */
+    (function () {
+      function show(msg) {
+        var m = document.getElementById('splashMsg'), sp = document.getElementById('splash');
+        if (!m || !sp || sp.className.indexOf('hide') >= 0 || sp.className.indexOf('failed') >= 0) return;
+        sp.className += ' failed';
+        m.innerHTML = '<div class="splash-err"></div><div style="margin-top:14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">' +
+          '<button class="btn btn-primary btn-sm" onclick="location.reload()">Coba lagi</button>' +
+          '<button class="btn btn-light btn-sm" onclick="try{localStorage.clear()}catch(e){};location.reload()">Hapus data lokal &amp; muat ulang</button></div>';
+        m.firstChild.textContent = msg;
+      }
+      window.__splashFail = show;
+      window.addEventListener('error', function (e) {
+        if (!window.__booted) show('Kode aplikasi gagal berjalan: ' + (e.message || 'error') + (e.lineno ? ' (baris ' + e.lineno + ')' : '') + '. Pastikan folder js/ (config.js & app.js) ikut ter-upload utuh ke repository, lalu muat ulang (Ctrl+Shift+R).');
+      });
+      setTimeout(function () { if (!window.__booted) show('Kode aplikasi tidak berjalan. Pastikan file css/style.css, js/config.js, dan js/app.js ada di repository GitHub, lalu muat ulang dengan Ctrl+Shift+R.'); }, 15000);
+    })();
+  </script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Splash: hanya tampil saat pertama kali tanpa snapshot lokal -->
+  <div id="splash" class="splash" role="status" aria-live="polite">
+    <div class="splash-logo app-logo"><i class="bi bi-book-half"></i></div>
+    <script>
+      (function () { try { var u = localStorage.getItem('an_logo'); if (u && u.indexOf('data:image/') === 0) { var el = document.querySelector('#splash .app-logo'); if (el) { el.innerHTML = ''; var im = new Image(); im.alt = 'Logo'; im.src = u; el.appendChild(im); el.classList.add('has-img'); } } } catch (e) {} })();
+    </script>
+    <div class="splash-title">Ayo Ngaji</div>
+    <div class="splash-sub" id="splashMsg">Menyiapkan aplikasi…</div>
+    <div class="splash-bar"><span></span></div>
+  </div>
+
+  <!-- ============ LOGIN ============ -->
+  <div id="loginView" class="login-view" hidden>
+    <div class="login-art" aria-hidden="true">
+      <div class="login-art-inner">
+        <div class="brand-mark lg app-logo"><i class="bi bi-book-half"></i></div>
+        <h1>Ayo Ngaji</h1>
+        <p>Database jamaah, kegiatan pengajian, absensi, capaian kurikulum, dan infaq kelompok dalam satu tempat.</p>
+        <ul class="login-points">
+          <li><i class="bi bi-people"></i> 7 jenjang: Balita hingga Dewasa</li>
+          <li><i class="bi bi-journal-richtext"></i> Buku penghubung untuk orang tua / wali</li>
+          <li><i class="bi bi-lightning-charge"></i> Absensi cepat satu ketukan</li>
+          <li><i class="bi bi-graph-up-arrow"></i> Grafik kehadiran, capaian & infaq</li>
+        </ul>
+      </div>
+    </div>
+    <div class="login-panel">
+      <div class="login-stack">
+      <div class="seg-tabs login-mode" id="loginMode" role="tablist" aria-label="Masuk sebagai">
+        <button type="button" role="tab" data-mode="admin" class="active" aria-selected="true"><i class="bi bi-person-badge"></i> Pengurus</button>
+        <button type="button" role="tab" data-mode="jamaah" aria-selected="false"><i class="bi bi-person-check"></i> Jamaah</button>
+        <button type="button" role="tab" data-mode="wali" aria-selected="false"><i class="bi bi-house-heart"></i> Wali</button>
+      </div>
+      <form id="loginForm" class="login-card" novalidate>
+        <div class="brand-row">
+          <div class="brand-mark app-logo"><i class="bi bi-book-half"></i></div>
+          <div><div class="brand-name">Ayo Ngaji</div></div>
+        </div>
+        <h2>Assalamu'alaikum</h2>
+        <p class="muted">Masuk dengan email yang terdaftar di sistem.</p>
+        <label class="field">
+          <span class="field-label">Email</span>
+          <input type="email" id="loginEmail" class="input" autocomplete="username" placeholder="nama@contoh.id" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Kata sandi</span>
+          <span class="input-wrap">
+            <input type="password" id="loginPassword" class="input" autocomplete="current-password" placeholder="Minimal 8 karakter" required>
+            <button type="button" class="input-icon-btn" id="togglePw" aria-label="Tampilkan kata sandi"><i class="bi bi-eye"></i></button>
+          </span>
+        </label>
+        <div id="loginError" class="form-error" role="alert" hidden></div>
+        <button type="submit" class="btn btn-primary btn-block" id="loginBtn"><i class="bi bi-box-arrow-in-right"></i> Masuk</button>
+        <p class="tiny muted center mt-3">Akun Admin Kelompok dibuat oleh Master Admin. Belum punya akun atau lupa kata sandi? Hubungi Master Admin.</p>
+      </form>
+      <form id="jmLoginForm" class="login-card" novalidate hidden>
+        <div class="brand-row">
+          <div class="brand-mark"><i class="bi bi-person-check"></i></div>
+          <div><div class="brand-name">Absen Mandiri</div><div class="tiny muted">Khusus jamaah</div></div>
+        </div>
+        <h2>Assalamu'alaikum</h2>
+        <p class="muted">Masuk untuk absen hadir saat pengajian. Gunakan ID Jamaah dan PIN dari pengurus.</p>
+        <label class="field">
+          <span class="field-label">ID Jamaah</span>
+          <input type="text" id="jmId" class="input mono" autocomplete="username" placeholder="mis. JM-RMJ0412A2" required style="text-transform:uppercase">
+        </label>
+        <label class="field">
+          <span class="field-label">PIN (6 angka)</span>
+          <input type="password" id="jmPin" class="input mono" inputmode="numeric" maxlength="6" autocomplete="current-password" placeholder="••••••" required>
+        </label>
+        <div id="jmError" class="form-error" role="alert" hidden></div>
+        <button type="submit" class="btn btn-primary btn-block" id="jmBtn"><i class="bi bi-box-arrow-in-right"></i> Masuk</button>
+        <p class="tiny muted center mt-3">Akun ini hanya untuk absen kehadiran. Belum punya PIN? Hubungi pengurus kelompok.</p>
+      </form>
+      <form id="waliLoginForm" class="login-card" novalidate hidden>
+        <div class="brand-row">
+          <div class="brand-mark"><i class="bi bi-house-heart"></i></div>
+          <div><div class="brand-name">Buku Penghubung</div><div class="tiny muted">Orang Tua / Wali</div></div>
+        </div>
+        <h2>Assalamu'alaikum</h2>
+        <p class="muted">Masukkan ID Jamaah dan PIN dari pengurus pengajian ananda.</p>
+        <label class="field">
+          <span class="field-label">ID Jamaah</span>
+          <input type="text" id="waliId" class="input mono" autocomplete="username" placeholder="mis. JM-CBR0412A2" required style="text-transform:uppercase">
+        </label>
+        <label class="field">
+          <span class="field-label">PIN (6 angka)</span>
+          <input type="password" id="waliPin" class="input mono" inputmode="numeric" maxlength="6" autocomplete="current-password" placeholder="••••••" required>
+        </label>
+        <div id="waliError" class="form-error" role="alert" hidden></div>
+        <button type="submit" class="btn btn-primary btn-block" id="waliBtn"><i class="bi bi-box-arrow-in-right"></i> Masuk</button>
+        <p class="tiny muted center mt-3">Belum punya PIN atau lupa? Hubungi pengurus/pengajar kelompok.</p>
+      </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ PORTAL ORANG TUA / WALI ============ -->
+  <div id="waliView" class="wali-view" hidden></div>
+
+  <!-- ============ APLIKASI ============ -->
+  <div id="appView" class="app" hidden>
+    <aside id="sidebar" class="sidebar" aria-label="Navigasi utama">
+      <div class="sidebar-head">
+        <div class="brand-mark app-logo"><i class="bi bi-book-half"></i></div>
+        <div><div class="brand-name">Ayo Ngaji</div></div>
+        <button class="icon-btn sidebar-close" onclick="UI.closeSidebar()" aria-label="Tutup menu"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <div class="kel-switch" id="kelSwitch"></div>
+      <nav id="sideNav" class="side-nav"></nav>
+      <div class="sync-card">
+        <div class="sync-row"><span class="dot dot-ok" id="syncDot"></span><span id="syncCardText">Sinkron Google Workspace</span></div>
+        <div class="sync-links">
+          <span><i class="bi bi-table"></i> Sheets</span><span><i class="bi bi-folder2"></i> Drive</span><span><i class="bi bi-code-slash"></i> Scripts</span>
+        </div>
+      </div>
+    </aside>
+    <div class="sidebar-backdrop" id="sidebarBackdrop" onclick="UI.closeSidebar()"></div>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" onclick="UI.openSidebar()" aria-label="Buka menu"><i class="bi bi-list"></i></button>
+        <div class="global-search">
+          <i class="bi bi-search"></i>
+          <input type="search" id="globalSearch" placeholder="Cari jamaah, kegiatan… (Ctrl+K)" aria-label="Pencarian global" autocomplete="off">
+          <div class="search-pop" id="searchPop" hidden></div>
+        </div>
+        <div class="pill sync-pill" id="syncPill" title="Status sinkronisasi"><span class="dot dot-ok"></span><span id="syncText">Tersambung ke Google Sheets</span></div>
+        <div class="pill role-pill" id="rolePill"><i class="bi bi-shield-check"></i><span></span></div>
+        <button class="icon-btn" id="refreshBtn" onclick="App.refresh()" aria-label="Muat ulang data" title="Muat ulang data"><i class="bi bi-arrow-clockwise"></i></button>
+        <button class="icon-btn" id="themeBtn" onclick="UI.toggleTheme()" aria-label="Ganti tema terang/gelap" title="Tema"><i class="bi bi-moon-stars"></i></button>
+        <div class="user-menu">
+          <button class="user-btn" id="userBtn" aria-haspopup="true" aria-expanded="false">
+            <span class="user-meta"><b id="userName"></b><small id="userRole"></small></span>
+            <span class="avatar" id="userAvatar"></span>
+          </button>
+          <div class="dropdown" id="userDropdown" hidden>
+            <button onclick="Pages.akun.changePassword()"><i class="bi bi-key"></i> Ganti kata sandi</button>
+            <button onclick="UI.toggleTheme()"><i class="bi bi-circle-half"></i> Ganti tema</button>
+            <hr>
+            <button class="danger" onclick="App.logout()"><i class="bi bi-box-arrow-left"></i> Keluar</button>
+          </div>
+        </div>
+      </header>
+
+      <main id="main" class="main" tabindex="-1">
+        <section id="page-dashboard" class="page" aria-label="Dashboard"></section>
+        <section id="page-jamaah" class="page" aria-label="Data Jamaah"></section>
+        <section id="page-kurikulum" class="page" aria-label="Kurikulum & Materi"></section>
+        <section id="page-kegiatan" class="page" aria-label="Kegiatan & Jadwal"></section>
+        <section id="page-absensi" class="page" aria-label="Absensi Cepat"></section>
+        <section id="page-jumat" class="page" aria-label="Jadwal Jum'at"></section>
+        <section id="page-capaian" class="page" aria-label="Capaian Jamaah"></section>
+        <section id="page-buku" class="page" aria-label="Buku Penghubung"></section>
+        <section id="page-kehadiran" class="page" aria-label="Persentase Kehadiran"></section>
+        <section id="page-infaq" class="page" aria-label="Infaq Pengajian"></section>
+        <section id="page-laporan" class="page" aria-label="Laporan & Rekap"></section>
+        <section id="page-pengguna" class="page" aria-label="Kelola Pengguna"></section>
+        <section id="page-pengaturan" class="page" aria-label="Pengaturan"></section>
+      </main>
+    </div>
+
+    <nav class="bottom-nav" id="bottomNav" aria-label="Navigasi bawah"></nav>
+  </div>
+
+  <!-- Modal & toast root -->
+  <div id="modalRoot"></div>
+  <div id="toastRoot" class="toast-root" aria-live="polite"></div>
+
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
