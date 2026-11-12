@@ -473,6 +473,17 @@ a { color: var(--primary); }
 .target-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .target-list li { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; background: var(--surface-2); border-radius: var(--r); font-size: 13px; }
 .target-list li i { color: var(--secondary); margin-top: 2px; }
+/* Lampiran file materi & target */
+.lamp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.lamp-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); font-size: 12px; color: var(--text); text-decoration: none; min-height: 30px; }
+.lamp-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.lamp-chip i { color: var(--primary); margin: 0; }
+.lamp-chip:hover, .lamp-chip:focus-visible { border-color: var(--primary); background: var(--surface-2); }
+.lamp-drop { display: flex; align-items: center; gap: 14px; padding: 16px 18px; border: 2px dashed var(--border); border-radius: var(--r-md); cursor: pointer; background: var(--surface-2); }
+.lamp-drop > i { font-size: 26px; color: var(--primary); }
+.lamp-drop:hover, .lamp-drop:focus-within { border-color: var(--primary); }
+.steps-list { margin: 0; padding-left: 20px; font-size: 14px; }
+.steps-list li::marker { font-weight: 700; color: var(--primary); }
 
 /* Usia config */
 .usia-card { display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--surface); border-top: 3px solid var(--primary); }

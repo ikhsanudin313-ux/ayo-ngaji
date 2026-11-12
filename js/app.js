@@ -272,8 +272,10 @@ const S = {
 
 const Store = {
   isMaster() { return S.user && S.user.Peran === 'Master Admin'; },
-  isSuper() { return !!S.user && S.user.Peran === 'Super Admin'; },
-  /** Master & Super Admin melihat lintas kelompok. */
+  /** Admin PPG (dulu "Super Admin"): seperti Master untuk generus, tanpa kelola pengguna, tanpa Dewasa & gabungan. */
+  isSuper() { return !!S.user && (S.user.Peran === 'Admin PPG' || S.user.Peran === 'Super Admin'); },
+  /** Admin pusat (Master Admin & Admin PPG). */
+  isAdm() { return Store.isMaster() || Store.isSuper(); },
   isGuru() { return !!S.user && S.user.Peran === 'Guru'; },
   /** Jenjang yang diajar Guru (Balita–Usia Nikah). */
   guruJJ() { return String((S.user && S.user.Jenjang_Ajar) || '').split(',').map(x => x.trim()).filter(j => JENJANG_TARGET.includes(j)); },
@@ -284,11 +286,17 @@ const Store = {
   /** Akun hanya-lihat untuk data induk jamaah (Guru & Penerobos Desa). */
   isPnrKel() { return !!S.user && S.user.Peran === 'Penerobos Kelompok'; },
   /** Boleh mengelola jadwal Khotbah Jum'at. */
-  canJumat() { return Store.isMaster() || Store.isSuper() || (S.user && S.user.Peran === 'Admin Kelompok') || Store.isPnrKel(); },
+  canJumat() { return Store.isAdm() || (S.user && S.user.Peran === 'Admin Kelompok') || Store.isPnrKel(); },
   readOnly() { return Store.isGuru() || Store.isPenerobos() || Store.isPnrKel(); },
   allKel() { return Store.isMaster() || Store.isSuper() || Store.guruSemua() || Store.isPenerobos(); },
-  /** Jenjang yang boleh dikelola: Super Admin tanpa Dewasa. */
+  /** Jenjang yang boleh dikelola: Admin PPG tanpa Dewasa; Guru jenjang ajarnya. */
   jj() { return Store.isGuru() ? Store.guruJJ() : Store.isSuper() ? JENJANG_TARGET : JENJANG; },
+  /** Jenjang untuk absensi & rekap kehadiran: Guru mengabsen semua pengajian kelompoknya (termasuk Dewasa). */
+  jjAbs() { return Store.isGuru() ? JENJANG : Store.jj(); },
+  /** Sesi yang infaqnya boleh dicatat akun ini (bukan gabungan; Guru hanya Balita–Usia Nikah). */
+  infOk(k) { return !!k && !isGab(k) && (!Store.isGuru() || JENJANG_TARGET.includes(k.Jenjang)); },
+  /** Boleh mencatat/mengubah infaq (Admin Kelompok & Guru; Master/Admin PPG hanya melihat). */
+  canInfaq() { return !Store.isMaster() && !Store.isSuper() && !Store.isPenerobos() && !Store.isPnrKel(); },
   myKel() { return S.user ? String(S.user.ID_Kelompok || '') : ''; },
   /** Filter kelompok global: master bisa pilih, admin selalu kelompoknya. */
   scopeKel() { return Store.allKel() ? S.ui.kel : Store.myKel(); },
@@ -302,6 +310,8 @@ const Store = {
     ['jamaah', 'kelompok', 'materi', 'target', 'kegiatan', 'infaq', 'log', 'pengguna', 'absensi', 'capaian', 'buku'].forEach(k => { if (!Array.isArray(S.d[k])) S.d[k] = []; });
     if (!S.d.settings) S.d.settings = { usia: { Caberawit: [4, 11], 'Pra Remaja': [12, 14], Remaja: [15, 18], 'Usia Nikah': [19, 30], Dewasa: [31, ''] } };
     S.d.infaq.forEach(i => { i.Jumlah = Number(i.Jumlah) || 0; });
+    S.d.absFrom = S.d.absFrom || '';           // '' = seluruh riwayat absensi sudah termuat
+    if (S.d.absFrom0 === undefined) S.d.absFrom0 = S.d.absFrom; // batas bawaan dari server (untuk snapshot)
     if (S.d.settings.logo !== undefined) Logo.set(S.d.settings.logo);
     Store.index();
   },
@@ -335,9 +345,44 @@ const Store = {
 
   persist: debounce(() => {
     if (!S.user || !S.d) return;
-    const ok = LS.setJson('an_snap_' + S.user.Email, { v: 1, at: Date.now(), d: S.d });
+    // Snapshot hanya menyimpan absensi periode bawaan agar tidak membengkak setelah membuka riwayat lama
+    let d = S.d;
+    if (d.absFrom0 && d.absFrom !== d.absFrom0) {
+      const f = d.absFrom0;
+      d = Object.assign({}, d, { absFrom: f, absensi: d.absensi.filter(a => { const k = S.idx.keg.get(a[0]); return !k || String(k.Tanggal) >= f; }) });
+    }
+    const ok = LS.setJson('an_snap_' + S.user.Email, { v: 1, at: Date.now(), d });
     if (!ok) LS.del('an_snap_' + S.user.Email); // kuota penuh → abaikan snapshot
   }, 600),
+
+  /** Riwayat absensi: saat login hanya 12 bulan terakhir; yang lebih lama dimuat saat dibutuhkan. */
+  absKnown(tgl) { const f = S.d.absFrom; return !f || String(tgl) >= f; },
+  absLabel() { return S.d.absFrom ? 'sejak ' + D.monthLabel(S.d.absFrom.slice(0, 7)) : 'keseluruhan'; },
+  /** Muat absensi sejak tanggal `dari` (bila belum termuat). Mengembalikan Promise<boolean>. */
+  ensureAbs(dari) {
+    if (Store.absKnown(dari)) return Promise.resolve(true);
+    if (S.absLoad) return S.absLoad.then(() => Store.ensureAbs(dari));
+    const sampai = S.d.absFrom, user = S.user && S.user.Email;
+    S.absLoad = API.run('apiAbsensiLama', dari, sampai).then(res => {
+      if (!S.d || S.d.absFrom !== sampai || (S.user && S.user.Email) !== user) return false; // data sudah diganti (refresh/logout)
+      const ada = new Set(S.d.absensi.map(a => a[0] + '|' + a[1]));
+      S.d.absensi = (res.absensi || []).filter(a => !ada.has(a[0] + '|' + a[1])).concat(S.d.absensi);
+      S.d.absFrom = dari <= '0000-00-00' ? '' : dari;
+      Store.index();
+      return true;
+    }).finally(() => { S.absLoad = null; });
+    return S.absLoad;
+  },
+  /** Gerbang halaman: true bila data siap; jika belum, mulai memuat lalu panggil `rerender` saat selesai. */
+  absGate(dari, rerender, el) {
+    if (Store.absKnown(dari)) return true;
+    if (el) el.innerHTML = `<div class="card"><div class="empty"><i class="bi bi-arrow-repeat spin-icon"></i>Memuat riwayat absensi lama dari server…<div class="tiny muted mt-1">Saat login hanya absensi 12 bulan terakhir yang dimuat agar aplikasi tetap ringan.</div></div></div>`;
+    Store.ensureAbs(dari).then(ok => { if (ok) rerender(); }).catch(e => {
+      UI.toast('Gagal memuat riwayat absensi lama: ' + e.message, 'bad');
+      if (el) el.innerHTML = `<div class="card"><div class="empty"><i class="bi bi-wifi-off"></i>Riwayat absensi lama belum bisa dimuat.<div class="mt-2"><button class="btn btn-primary btn-sm" onclick="Router.go(S.page)"><i class="bi bi-arrow-clockwise"></i> Coba Lagi</button></div></div></div>`;
+    });
+    return false;
+  },
 
   /** Upsert ke array (mengembalikan array baru agar rollback mudah). */
   upsert(arrName, rec, key) {
@@ -348,7 +393,8 @@ const Store = {
   },
 
   // Turunan umum
-  jamaahScope(all) { return S.d.jamaah.filter(j => Store.inScope(j) && (all || j.Status_Aktif === 'Aktif')); },
+  /** Jamaah dalam cakupan. Guru: hanya jenjang ajarnya, kecuali `semuaJJ` (absensi/rekap kehadiran). */
+  jamaahScope(all, semuaJJ) { const g = Store.isGuru() && !semuaJJ ? Store.guruJJ() : null; return S.d.jamaah.filter(j => Store.inScope(j) && (all || j.Status_Aktif === 'Aktif') && (!g || g.includes(j.Jenjang))); },
   kegScope() { return S.d.kegiatan.filter(Store.inScope); },
   infScope() { return S.d.infaq.filter(Store.inScope); },
   kegiatanLabel(k) { return k ? `${D.short(k.Tanggal)} · ${k.Waktu_Mulai} — ${k.Nama_Kegiatan}` : '–'; }
@@ -601,17 +647,17 @@ const NAV = [
   { id: 'capaian', icon: 'bi-award', label: 'Capaian Jamaah' },
   { id: 'buku', icon: 'bi-journal-richtext', label: 'Buku Penghubung' },
   { g: 'Keuangan & Laporan' },
-  { id: 'infaq', icon: 'bi-cash-coin', label: 'Infaq Pengajian', noGuru: true },
+  { id: 'infaq', icon: 'bi-cash-coin', label: 'Infaq Pengajian' },
   { id: 'kehadiran', icon: 'bi-percent', label: 'Persentase Kehadiran' },
   { id: 'laporan', icon: 'bi-file-earmark-bar-graph', label: 'Laporan & Rekap', noGuru: true },
-  { g: 'Sistem', master: true },
+  { g: 'Sistem', adm: true },
   { id: 'pengguna', icon: 'bi-person-gear', label: 'Kelola Pengguna', master: true },
-  { id: 'pengaturan', icon: 'bi-gear', label: 'Pengaturan', master: true }
+  { id: 'pengaturan', icon: 'bi-gear', label: 'Pengaturan', adm: true }
 ];
 const BOTTOM = [['dashboard', 'bi-grid-1x2', 'Beranda'], ['jamaah', 'bi-people', 'Jamaah'], ['absensi', 'bi-check2-square', 'Absensi'], ['capaian', 'bi-award', 'Capaian'], ['__menu', 'bi-list', 'Menu']];
 
 const Router = {
-  allowed(id) { const n = NAV.find(x => x.id === id); return n && (!n.master || Store.isMaster()) && (!n.noGuru || !Store.isGuru()) && (!Store.isPenerobos() || PNR_NAV.includes(id)) && (!Store.isPnrKel() || PNRK_NAV.includes(id)); },
+  allowed(id) { const n = NAV.find(x => x.id === id); return n && (!n.master || Store.isMaster()) && (!n.adm || Store.isAdm()) && (!n.noGuru || !Store.isGuru()) && (!Store.isPenerobos() || PNR_NAV.includes(id)) && (!Store.isPnrKel() || PNRK_NAV.includes(id)); },
   go(page, params) {
     if (!Router.allowed(page)) page = 'dashboard';
     S.page = page;
@@ -642,7 +688,7 @@ const Router = {
     if (Store.allKel()) {
       el.innerHTML = `<i class="bi bi-people-fill lead"></i><div class="grow"><small>Kelompok Aktif</small>
         <select id="kelSelect" aria-label="Pilih kelompok aktif">${opt('ALL', 'Semua Kelompok (Pusat)', S.ui.kel)}${S.d.kelompok.filter(k => k.Status_Aktif !== 'Nonaktif').map(k => opt(k.ID_Kelompok, k.Nama_Kelompok, S.ui.kel)).join('')}</select></div>
-        ${Store.isSuper() ? '<span class="badge b-primary">Super</span>' : Store.isGuru() ? '<span class="badge b-mint">Guru</span>' : '<span class="badge b-gold">Pusat</span>'}`;
+        ${Store.isSuper() ? '<span class="badge b-primary">PPG</span>' : Store.isGuru() ? '<span class="badge b-mint">Guru</span>' : '<span class="badge b-gold">Pusat</span>'}`;
       $('#kelSelect').onchange = e => { S.ui.kel = e.target.value; LS.set('an_kel', S.ui.kel); S.ui.jm.page = 1; S.ui.cap.page = 1; Router.render(); };
     } else {
       el.innerHTML = `<i class="bi bi-people-fill lead"></i><div class="grow"><small>Kelompok Aktif</small><b>${esc(Store.kelName(Store.myKel()))}</b></div>${Store.isGuru() ? '<span class="badge b-mint">Guru</span>' : Store.isPnrKel() ? '<span class="badge b-gold">Penerobos</span>' : '<span class="badge b-ok">Admin</span>'}`;
@@ -781,7 +827,7 @@ const App = {
     $('#userRole').textContent = S.user.Peran + (Store.isGuru() ? ' · ' + Store.guruJJ().join(', ') : Store.allKel() ? '' : ' · ' + Store.kelName(Store.myKel()));
     document.body.classList.toggle('is-guru', Store.readOnly());
     $('#userAvatar').textContent = F.initials(S.user.Nama);
-    $('#rolePill span').textContent = Store.isMaster() ? 'Master Admin · Pusat' : Store.isSuper() ? 'Super Admin · Generus' : Store.isPenerobos() ? 'Penerobos Desa · Gabungan' : Store.isPnrKel() ? 'Penerobos · ' + Store.kelName(Store.myKel()) : Store.isGuru() ? 'Guru · ' + (Store.guruSemua() ? 'Semua Kelompok' : Store.kelName(Store.myKel())) : 'Admin · ' + Store.kelName(Store.myKel());
+    $('#rolePill span').textContent = Store.isMaster() ? 'Master Admin · Pusat' : Store.isSuper() ? 'Admin PPG · Generus' : Store.isPenerobos() ? 'Penerobos Desa · Gabungan' : Store.isPnrKel() ? 'Penerobos · ' + Store.kelName(Store.myKel()) : Store.isGuru() ? 'Guru · ' + (Store.guruSemua() ? 'Semua Kelompok' : Store.kelName(Store.myKel())) : 'Admin · ' + Store.kelName(Store.myKel());
     Router.buildNav();
     Router.buildKelSwitch();
     UI.sync();
@@ -798,7 +844,14 @@ const App = {
       const res = await API.run('apiBootstrap');
       if (S.pending > 0) { setTimeout(() => App.refresh(true), 2500); return true; } // jangan timpa perubahan yang sedang dikirim
       S.user = res.user; LS.setJson('an_user', res.user);
+      // Pertahankan riwayat absensi lama yang sudah dimuat (tidak ikut dikirim ulang saat sinkron)
+      let lama = null;
+      if (S.d && S.d.absFrom0 && S.d.absFrom !== S.d.absFrom0 && res.data.absFrom) {
+        const batas = res.data.absFrom;
+        lama = { from: S.d.absFrom, rows: S.d.absensi.filter(r => { const k = S.idx.keg.get(r[0]); return k && String(k.Tanggal) < batas; }) };
+      }
       Store.load(res.data);
+      if (lama) { S.d.absensi = lama.rows.concat(S.d.absensi); S.d.absFrom = lama.from; Store.index(); }
       S.ver = res.data.ver || S.ver; S.lastCheck = Date.now();
       S.lastSync = Date.now(); S.syncError = false;
       Store.persist();
@@ -1368,7 +1421,7 @@ Pages.jamaah = {
           <div class="meta-row mt-1"><span class="mono">${esc(j.ID_Jamaah)}</span><span><i class="bi bi-people"></i> ${esc(Store.kelName(j.ID_Kelompok))}</span><span><i class="bi bi-cake2"></i> ${j.Tempat_Lahir ? esc(j.Tempat_Lahir) + ', ' : ''}${D.long(j.Tanggal_Lahir)} (${D.age(j.Tanggal_Lahir)} th)</span></div>
           <div class="meta-row mt-1">${j.No_HP_Jamaah ? `<span title="No. HP jamaah"><i class="bi bi-phone"></i> ${waNum(j.No_HP_Jamaah) ? `<a href="${attr(waLink(j.No_HP_Jamaah, "Assalamu'alaikum " + j.Nama_Lengkap + ', '))}" target="_blank" rel="noopener">${esc(j.No_HP_Jamaah)}</a>` : esc(j.No_HP_Jamaah)}</span>` : ''}<span><i class="bi bi-person"></i> ${esc(j.Nama_Wali || '–')}</span><span title="No. HP wali"><i class="bi bi-telephone"></i> ${esc(j.No_HP || '–')}</span><span><i class="bi bi-house"></i> ${esc(j.Alamat || '–')}</span></div></div></div>
         <div class="kv mt-3">
-          <div>Kehadiran keseluruhan<b class="ok">${att.total ? att.pct + '%' : '–'}</b></div>
+          <div>Kehadiran ${esc(Store.absLabel())}<b class="ok">${att.total ? att.pct + '%' : '–'}</b></div>
           <div>Hadir / sesi<b>${att.h} / ${att.total}</b></div>
           <div>8 sesi terakhir<b>${last.total ? last.pct + '%' : '–'}</b></div>
           ${pr ? `<div>Target tercapai<b class="ok">${pr.done} / ${pr.total} (${pr.pct}%)</b></div>` : '<div>Kurikulum<b>Kajian tematik</b></div>'}
@@ -1391,11 +1444,189 @@ Pages.jamaah = {
   }
 };
 
+/* ───────────────────────── LAMPIRAN FILE (materi & target) ───────────────────────── */
+const Lampiran = {
+  MAKS: 5, MB: 10,
+  EXT: ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'webp', 'mp3', 'm4a', 'mp4'],
+  list(v) { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } },
+  icon(n) {
+    const e = (String(n).match(/\.([a-z0-9]+)$/i) || [])[1] || '';
+    return ({ pdf: 'bi-file-earmark-pdf', doc: 'bi-file-earmark-word', docx: 'bi-file-earmark-word', ppt: 'bi-file-earmark-slides', pptx: 'bi-file-earmark-slides', xls: 'bi-file-earmark-excel', xlsx: 'bi-file-earmark-excel',
+      jpg: 'bi-file-earmark-image', jpeg: 'bi-file-earmark-image', png: 'bi-file-earmark-image', webp: 'bi-file-earmark-image', mp3: 'bi-file-earmark-music', m4a: 'bi-file-earmark-music', mp4: 'bi-file-earmark-play' })[e.toLowerCase()] || 'bi-file-earmark';
+  },
+  size(b) { b = Number(b) || 0; return b >= 1048576 ? (b / 1048576).toFixed(1).replace('.', ',') + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; },
+  /** Daftar tautan lampiran (untuk semua yang melihat materi/target). */
+  chips(v) {
+    const l = Lampiran.list(v);
+    return l.length ? `<div class="lamp-chips">${l.map(f => `<a class="lamp-chip" href="${attr(f.u)}" target="_blank" rel="noopener" title="Buka ${attr(f.n)}"><i class="bi ${Lampiran.icon(f.n)}"></i><span>${esc(f.n)}</span></a>`).join('')}</div>` : '';
+  },
+  row(jenis, id) { return jenis === 'materi' ? S.idx.mat.get(id) : S.idx.tgt.get(id); },
+  apply(jenis, id, json) {
+    if (jenis === 'materi') Store.upsert('materi', { ID_Materi: id, Lampiran: json }, 'ID_Materi');
+    else Store.upsert('target', { ID_Target: id, Lampiran: json }, 'ID_Target');
+    Store.index(); Store.persist();
+  },
+  /** Kelola lampiran satu materi/target: lihat, unggah (maks. 5 file @10 MB), hapus. */
+  open(jenis, id) {
+    const r = Lampiran.row(jenis, id);
+    if (!r) return;
+    const judul = jenis === 'materi' ? r.Nama_Materi : r.Deskripsi_Target;
+    const m = UI.modal({
+      title: 'Lampiran ' + (jenis === 'materi' ? 'Materi' : 'Target'), size: 'lg',
+      body: `<div class="muted small mb-3"><b>${esc(judul)}</b></div><div id="lampBody"></div>
+        <label class="lamp-drop mt-3" id="lampDrop"><i class="bi bi-cloud-arrow-up"></i><div><b>Pilih file untuk diunggah</b><div class="tiny muted">PDF, Word, PowerPoint, Excel, gambar, MP3/MP4 · maks. ${Lampiran.MB} MB per file · maks. ${Lampiran.MAKS} file</div></div>
+          <input type="file" id="lampFile" multiple hidden accept="${Lampiran.EXT.map(e => '.' + e).join(',')}"></label>
+        <div id="lampProg" class="mt-2"></div>
+        <p class="tiny muted mt-2"><i class="bi bi-google"></i> File disimpan di folder Drive <b>Ayo Ngaji › Bahan Ajar</b> dan bisa dibuka siapa saja yang memiliki tautannya.</p>`,
+      foot: '<button class="btn btn-primary" data-close>Selesai</button>'
+    });
+    const draw = () => {
+      const l = Lampiran.list((Lampiran.row(jenis, id) || {}).Lampiran);
+      $('#lampBody', m.el).innerHTML = l.length ? `<div class="list">${l.map(f => `<div class="list-item"><i class="bi ${Lampiran.icon(f.n)}" style="font-size:22px;color:var(--primary)"></i>
+          <div class="grow"><div class="cell-strong small">${esc(f.n)}</div><div class="cell-sub">${Lampiran.size(f.s)}${f.w ? ' · ' + esc(String(f.w).slice(0, 10)) : ''}</div></div>
+          <a class="btn btn-light btn-sm" href="${attr(f.u)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right"></i> Buka</a>
+          <button class="icon-btn sm" aria-label="Hapus lampiran ${attr(f.n)}" data-del="${attr(f.id)}"><i class="bi bi-trash3" style="color:var(--bad)"></i></button></div>`).join('')}</div>`
+        : emptyState('bi-paperclip', 'Belum ada file lampiran.');
+      $('#lampDrop', m.el).hidden = l.length >= Lampiran.MAKS;
+      m.el.querySelectorAll('[data-del]').forEach(b => { b.onclick = () => del(b.dataset.del, b); });
+    };
+    const del = async (fid, btn) => {
+      const f = Lampiran.list(Lampiran.row(jenis, id).Lampiran).find(x => x.id === fid);
+      if (!f || !(await UI.confirm(`Hapus lampiran <b>${esc(f.n)}</b>? File dipindahkan ke Sampah Google Drive.`, { ok: 'Hapus', danger: true }))) return;
+      UI.busy(btn, true, '');
+      try { const res = await API.run('apiHapusLampiran', jenis, id, fid); Lampiran.apply(jenis, id, res.Lampiran); draw(); Router.render(); UI.toast('Lampiran dihapus.', 'ok'); }
+      catch (e) { UI.toast(e.message, 'bad'); UI.busy(btn, false); }
+    };
+    $('#lampFile', m.el).onchange = async e => {
+      const files = [...e.target.files]; e.target.value = '';
+      const prog = $('#lampProg', m.el);
+      for (const file of files) {
+        const ada = Lampiran.list(Lampiran.row(jenis, id).Lampiran).length;
+        const ext = (file.name.match(/\.([a-z0-9]+)$/i) || [])[1] || '';
+        if (ada >= Lampiran.MAKS) { UI.toast(`Maksimal ${Lampiran.MAKS} file. ${file.name} dilewati.`, 'warn'); continue; }
+        if (!Lampiran.EXT.includes(ext.toLowerCase())) { UI.toast(`${file.name}: jenis file tidak didukung.`, 'warn'); continue; }
+        if (file.size > Lampiran.MB * 1048576) { UI.toast(`${file.name} lebih dari ${Lampiran.MB} MB.`, 'warn'); continue; }
+        prog.innerHTML = `<div class="note"><i class="bi bi-arrow-repeat spin-icon"></i><div>Mengunggah <b>${esc(file.name)}</b> (${Lampiran.size(file.size)})…</div></div>`;
+        try {
+          const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(new Error('File tidak bisa dibaca.')); fr.readAsDataURL(file); });
+          const res = await API.run('apiUploadLampiran', jenis, id, { name: file.name, type: file.type, data });
+          Lampiran.apply(jenis, id, res.Lampiran); draw(); Router.render();
+          UI.toast(file.name + ' terunggah.', 'ok');
+        } catch (err) { UI.toast(file.name + ': ' + err.message, 'bad'); }
+      }
+      prog.innerHTML = '';
+    };
+    draw();
+  }
+};
+
+/* ───────────────────────── IMPOR KURIKULUM DARI EXCEL ───────────────────────── */
+const KurImpor = {
+  KOLOM_M: ['Kode', 'Jenjang', 'Kelas', 'Kategori', 'Nama_Materi', 'Deskripsi', 'Urutan', 'Status'],
+  KOLOM_T: ['Kode_Materi', 'Jenjang', 'Nama_Materi', 'Deskripsi_Target', 'Indikator', 'Batas_Waktu', 'Status'],
+  /** Template berisi kurikulum pusat saat ini (bisa diedit lalu diimpor ulang) atau contoh bila masih kosong. */
+  async template(btn) {
+    UI.busy(btn, true, 'Menyiapkan…');
+    try {
+      await Excel.load();
+      const mats = S.d.materi.filter(m => m.Pengelola !== 'Ekskul' && JENJANG_TARGET.includes(m.Jenjang))
+        .sort((a, b) => JENJANG.indexOf(a.Jenjang) - JENJANG.indexOf(b.Jenjang) || (a.Kelas || '').localeCompare(b.Kelas || '') || (Number(a.Urutan) || 0) - (Number(b.Urutan) || 0));
+      let M = mats.map(m => ({ Kode: m.ID_Materi, Jenjang: m.Jenjang, Kelas: m.Kelas || '', Kategori: m.Kategori, Nama_Materi: m.Nama_Materi, Deskripsi: m.Deskripsi || '', Urutan: Number(m.Urutan) || 0, Status: m.Status_Aktif || 'Aktif' }));
+      const ids = new Set(mats.map(m => m.ID_Materi));
+      let T = S.d.target.filter(t => ids.has(t.ID_Materi)).map(t => { const m = S.idx.mat.get(t.ID_Materi); return { Kode_Materi: t.ID_Materi, Jenjang: t.Jenjang, Nama_Materi: m ? m.Nama_Materi : '', Deskripsi_Target: t.Deskripsi_Target, Indikator: t.Indikator || '', Batas_Waktu: t.Batas_Waktu || '', Status: t.Status_Aktif || 'Aktif' }; });
+      if (!M.length) {
+        M = [{ Kode: 'M1', Jenjang: 'Caberawit', Kelas: 'A1', Kategori: "Al-Qur'an", Nama_Materi: 'Membaca Iqro 1', Deskripsi: 'Pengenalan huruf hijaiyah', Urutan: 1, Status: 'Aktif' },
+          { Kode: 'M2', Jenjang: 'Remaja', Kelas: '', Kategori: 'Hadits', Nama_Materi: 'Hadits Adab Bergaul', Deskripsi: '', Urutan: 1, Status: 'Aktif' }];
+        T = [{ Kode_Materi: 'M1', Jenjang: '', Nama_Materi: '', Deskripsi_Target: 'Lancar mengenal huruf alif–ya', Indikator: 'Menyebut 28 huruf tanpa salah', Batas_Waktu: 'Semester 1', Status: 'Aktif' },
+          { Kode_Materi: 'M2', Jenjang: '', Nama_Materi: '', Deskripsi_Target: 'Hafal 3 hadits adab', Indikator: 'Setoran hafalan ke guru', Batas_Waktu: 'Semester 2', Status: 'Aktif' }];
+      }
+      const P = [['PETUNJUK IMPOR KURIKULUM AYO NGAJI'], [''],
+        ['Sheet "Materi" — satu baris per materi:'], ['  Kode', 'Kode bebas (mis. M1) untuk materi baru, atau ID materi yang sudah ada (mis. MAT-1A2B3C4D) untuk memperbarui.'],
+        ['  Jenjang', 'Balita, PAUD/TK, Caberawit, Pra Remaja, Remaja, atau Usia Nikah (wajib).'], ['  Kelas', 'Khusus Caberawit: A1–A6. Kosongkan = semua kelas.'],
+        ['  Kategori', "Wajib, mis. Al-Qur'an, Hadits, Fiqih, Akhlak."], ['  Nama_Materi', 'Wajib.'], ['  Deskripsi, Urutan', 'Opsional.'], ['  Status', 'Aktif atau Nonaktif (kosong = Aktif).'], [''],
+        ['Sheet "Target" — satu baris per target pencapaian:'], ['  Kode_Materi', 'Kode materi dari sheet Materi (atau ID materi yang sudah ada).'],
+        ['  Jenjang + Nama_Materi', 'Alternatif bila Kode_Materi kosong: materi dicari dari namanya.'], ['  Deskripsi_Target', 'Wajib.'], ['  Indikator, Batas_Waktu', 'Opsional.'], [''],
+        ['Catatan:'], ['  • Impor aman diulang: materi/target yang sama diperbarui, tidak digandakan.'], ['  • Bila ada satu baris salah, tidak ada data yang disimpan — perbaiki lalu impor lagi.'],
+        ['  • Menghapus baris di file TIDAK menghapus materi di aplikasi. Gunakan Status = Nonaktif atau hapus dari aplikasi.'],
+        ['  • Materi Dewasa & ekstrakurikuler tidak diimpor lewat file ini.']];
+      const wb = XLSX.utils.book_new();
+      const wsM = XLSX.utils.json_to_sheet(M, { header: KurImpor.KOLOM_M }); wsM['!cols'] = [14, 12, 7, 16, 36, 40, 8, 10].map(w => ({ wch: w }));
+      const wsT = XLSX.utils.json_to_sheet(T, { header: KurImpor.KOLOM_T }); wsT['!cols'] = [16, 12, 30, 40, 40, 14, 10].map(w => ({ wch: w }));
+      const wsP = XLSX.utils.aoa_to_sheet(P); wsP['!cols'] = [{ wch: 26 }, { wch: 100 }];
+      XLSX.utils.book_append_sheet(wb, wsM, 'Materi'); XLSX.utils.book_append_sheet(wb, wsT, 'Target'); XLSX.utils.book_append_sheet(wb, wsP, 'Petunjuk');
+      XLSX.writeFile(wb, 'Template Kurikulum Ayo Ngaji.xlsx');
+      UI.toast(mats.length ? 'Template berisi kurikulum saat ini diunduh. Edit lalu impor kembali.' : 'Template contoh diunduh.', 'ok');
+    } catch (e) { UI.toast(e.message, 'bad'); }
+    UI.busy(btn, false);
+  },
+  /** Baca file Excel → {materi, target}. Nama kolom tidak peka huruf besar/kecil & spasi. */
+  async parse(file) {
+    await Excel.load();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+    const norm = v => String(v).trim().toLowerCase().replace(/[\s_]+/g, '');
+    const sheet = name => { const n = wb.SheetNames.find(x => norm(x) === norm(name)); return n ? wb.Sheets[n] : null; };
+    const rows = (ws, cols) => {
+      if (!ws) return [];
+      return XLSX.utils.sheet_to_json(ws, { defval: '', raw: false }).map(r => {
+        const o = {}; Object.keys(r).forEach(k => { const c = cols.find(x => norm(x) === norm(k)); if (c) o[c] = String(r[k]).trim(); });
+        return o;
+      }).filter(o => Object.values(o).some(Boolean));
+    };
+    const materi = rows(sheet('Materi'), KurImpor.KOLOM_M), target = rows(sheet('Target'), KurImpor.KOLOM_T);
+    if (!sheet('Materi') && !sheet('Target')) throw new Error('Sheet "Materi" atau "Target" tidak ditemukan. Gunakan template dari tombol Unduh Template.');
+    return { materi, target };
+  },
+  open() {
+    let data = null;
+    const m = UI.modal({
+      title: 'Impor Materi & Target dari Excel', size: 'lg',
+      body: `<ol class="steps-list">
+          <li><b>Unduh template.</b> Berisi kurikulum pusat saat ini (atau contoh bila masih kosong), sheet <i>Materi</i>, <i>Target</i>, dan <i>Petunjuk</i>.
+            <div class="mt-2"><button class="btn btn-light btn-sm" id="kiTpl"><i class="bi bi-download"></i> Unduh Template Excel</button></div></li>
+          <li class="mt-3"><b>Isi atau ubah</b> baris materi & target, lalu simpan.</li>
+          <li class="mt-3"><b>Pilih file</b> untuk diperiksa sebelum disimpan.
+            <label class="lamp-drop mt-2"><i class="bi bi-file-earmark-spreadsheet"></i><div><b id="kiName">Pilih file .xlsx</b><div class="tiny muted">Hanya kurikulum pusat Balita–Usia Nikah</div></div><input type="file" id="kiFile" accept=".xlsx,.xls" hidden></label></li></ol>
+        <div id="kiPrev" class="mt-3"></div><div id="kiErr" class="form-error mt-2" style="white-space:pre-line" hidden></div>`,
+      foot: '<button class="btn btn-light" data-close>Batal</button><button class="btn btn-primary" id="kiGo" disabled><i class="bi bi-cloud-upload"></i> Impor Sekarang</button>'
+    });
+    const err = t => { const e = $('#kiErr', m.el); e.textContent = t || ''; e.hidden = !t; };
+    $('#kiTpl', m.el).onclick = e => KurImpor.template(e.currentTarget);
+    $('#kiFile', m.el).onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      $('#kiName', m.el).textContent = f.name; err(''); data = null; $('#kiGo', m.el).disabled = true;
+      $('#kiPrev', m.el).innerHTML = '<div class="note"><i class="bi bi-arrow-repeat spin-icon"></i><div>Membaca file…</div></div>';
+      try {
+        data = await KurImpor.parse(f);
+        const jjOk = v => JENJANG_TARGET.some(j => j.toLowerCase() === String(v).trim().toLowerCase());
+        const salah = data.materi.map((r, i) => !jjOk(r.Jenjang) ? `Materi baris ${i + 2}: jenjang "${r.Jenjang}" tidak dikenal.` : !r.Nama_Materi || !r.Kategori ? `Materi baris ${i + 2}: Kategori & Nama_Materi wajib.` : '')
+          .concat(data.target.map((r, i) => !r.Deskripsi_Target ? `Target baris ${i + 2}: Deskripsi_Target wajib.` : !r.Kode_Materi && !r.Nama_Materi ? `Target baris ${i + 2}: isi Kode_Materi atau Nama_Materi.` : '')).filter(Boolean);
+        const perJ = JENJANG_TARGET.map(j => [j, data.materi.filter(r => String(r.Jenjang).trim().toLowerCase() === j.toLowerCase()).length]).filter(x => x[1]);
+        $('#kiPrev', m.el).innerHTML = `<div class="grid-2"><div class="card kpi compact"><div class="kpi-label">Materi di file</div><div class="kpi-value">${data.materi.length}</div><div class="kpi-foot"><span>${perJ.map(([j, n]) => esc(j) + ' ' + n).join(' · ') || '–'}</span></div></div>
+          <div class="card kpi compact"><div class="kpi-label">Target di file</div><div class="kpi-value">${data.target.length}</div><div class="kpi-foot"><span>Materi & target yang sudah ada akan diperbarui</span></div></div></div>`;
+        if (salah.length) { err('Perbaiki dulu:\n• ' + salah.slice(0, 10).join('\n• ') + (salah.length > 10 ? `\n• …dan ${salah.length - 10} lainnya` : '')); data = null; return; }
+        if (!data.materi.length && !data.target.length) { err('File tidak berisi baris data.'); data = null; return; }
+        $('#kiGo', m.el).disabled = false;
+      } catch (x) { $('#kiPrev', m.el).innerHTML = ''; err(x.message); data = null; }
+    };
+    $('#kiGo', m.el).onclick = async e => {
+      if (!data) return;
+      const btn = e.currentTarget; UI.busy(btn, true, 'Mengimpor…'); err('');
+      try {
+        const r = await API.run('apiImportKurikulum', data);
+        r.materi.forEach(x => Store.upsert('materi', x, 'ID_Materi'));
+        r.target.forEach(x => Store.upsert('target', x, 'ID_Target'));
+        Store.index(); Store.persist(); m.close(); Router.render();
+        UI.toast(`Impor selesai: ${r.materiBaru} materi baru, ${r.materiUbah} diperbarui · ${r.targetBaru} target baru, ${r.targetUbah} diperbarui.`, 'ok');
+      } catch (x) { err(x.message); UI.busy(btn, false); }
+    };
+  }
+};
+
 /* ───────────────────────── KURIKULUM ───────────────────────── */
 Pages.kurikulum = {
   render() {
     if (!Store.jj().includes(S.ui.kur.jenjang)) S.ui.kur.jenjang = Store.jj()[0] || 'Caberawit';
-    const jj = S.ui.kur.jenjang, master = Store.isMaster(), dewasa = jj === 'Dewasa', guru = Store.isGuru();
+    const jj = S.ui.kur.jenjang, master = Store.isAdm(), dewasa = jj === 'Dewasa', guru = Store.isGuru();
     const kf = S.ui.kur.kelas;
     const kelasOk = m => jj !== 'Caberawit' || kf === 'ALL' || !m.Kelas || m.Kelas === kf;
     const eks = dewasa ? [] : S.d.materi.filter(m => m.Pengelola === 'Ekskul' && m.Jenjang === jj && Store.inScope(m) && kelasOk(m)).sort((a, b) => (Number(a.Urutan) || 0) - (Number(b.Urutan) || 0));
@@ -1408,42 +1639,45 @@ Pages.kurikulum = {
       const tg = S.d.target.filter(t => t.ID_Materi === m.ID_Materi);
       return `<div class="card materi-card ${m.Status_Aktif === 'Nonaktif' ? 'off' : ''}">
         <div class="row"><span class="cur-item code" style="padding:0;border:none">${esc(m.ID_Materi)}</span><span class="badge b-outline">${esc(m.Kategori)}</span>${jj === 'Caberawit' ? (m.Kelas ? kelasBadge(m.Kelas) : '<span class="badge b-mint">Semua kelas</span>') : ''}${m.Status_Aktif === 'Nonaktif' ? '<span class="badge b-bad">Nonaktif</span>' : ''}<span class="spacer"></span>
-          ${canEdit ? `<button class="icon-btn sm" aria-label="Ubah materi" onclick="Pages.kurikulum.materiForm('${m.ID_Materi}')"><i class="bi bi-pencil"></i></button>` : ''}${canEdit || master ? `<button class="icon-btn sm" aria-label="Hapus materi" title="Hapus materi" onclick="Pages.kurikulum.removeMateri('${m.ID_Materi}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>
+          ${canEdit ? `<button class="icon-btn sm" aria-label="Lampiran materi" title="Lampiran file" onclick="Lampiran.open('materi','${m.ID_Materi}')"><i class="bi bi-paperclip"></i></button><button class="icon-btn sm" aria-label="Ubah materi" onclick="Pages.kurikulum.materiForm('${m.ID_Materi}')"><i class="bi bi-pencil"></i></button>` : ''}${canEdit || master ? `<button class="icon-btn sm" aria-label="Hapus materi" title="Hapus materi" onclick="Pages.kurikulum.removeMateri('${m.ID_Materi}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>
         <div class="card-title">${esc(m.Nama_Materi)}</div>
         ${m.Deskripsi ? `<p class="muted small">${esc(m.Deskripsi)}</p>` : ''}
+        ${Lampiran.chips(m.Lampiran)}
         ${dewasa ? `<div class="tiny muted"><i class="bi bi-people"></i> ${esc(Store.kelName(m.ID_Kelompok))}</div>` : `
           <div class="row"><span class="field-label small">Target Pencapaian (${tg.length})</span><span class="spacer"></span>${canEdit ? `<button class="btn btn-soft btn-sm" onclick="Pages.kurikulum.targetForm(null,'${m.ID_Materi}')"><i class="bi bi-plus"></i> Target</button>` : ''}</div>
-          ${tg.length ? `<ul class="target-list">${tg.map(t => `<li class="${t.Status_Aktif === 'Nonaktif' ? 'faint' : ''}"><i class="bi bi-bullseye"></i><div class="grow"><div class="cell-strong">${esc(t.Deskripsi_Target)}</div><div class="cell-sub">${esc(t.Indikator || '')}${t.Batas_Waktu ? ' · ' + esc(t.Batas_Waktu) : ''}</div></div>${canEdit ? `<button class="icon-btn sm" aria-label="Ubah target" onclick="Pages.kurikulum.targetForm('${t.ID_Target}')"><i class="bi bi-pencil"></i></button>` : ''}</li>`).join('')}</ul>` : '<p class="tiny muted">Belum ada target.</p>'}`}
+          ${tg.length ? `<ul class="target-list">${tg.map(t => `<li class="${t.Status_Aktif === 'Nonaktif' ? 'faint' : ''}"><i class="bi bi-bullseye"></i><div class="grow"><div class="cell-strong">${esc(t.Deskripsi_Target)}</div><div class="cell-sub">${esc(t.Indikator || '')}${t.Batas_Waktu ? ' · ' + esc(t.Batas_Waktu) : ''}</div>${Lampiran.chips(t.Lampiran)}</div>${canEdit ? `<button class="icon-btn sm" aria-label="Lampiran target" title="Lampiran file" onclick="Lampiran.open('target','${t.ID_Target}')"><i class="bi bi-paperclip"></i></button><button class="icon-btn sm" aria-label="Ubah target" onclick="Pages.kurikulum.targetForm('${t.ID_Target}')"><i class="bi bi-pencil"></i></button>` : ''}</li>`).join('')}</ul>` : '<p class="tiny muted">Belum ada target.</p>'}`}
       </div>`;
     };
 
     const ekCard = m => `<div class="card materi-card eks-card ${m.Status_Aktif === 'Nonaktif' ? 'off' : ''}">
         <div class="row"><span class="badge b-gold"><i class="bi bi-stars"></i> Ekskul</span><span class="badge b-outline">${esc(m.Kategori)}</span>${jj === 'Caberawit' ? (m.Kelas ? kelasBadge(m.Kelas) : '<span class="badge b-mint">Semua kelas</span>') : ''}${m.Status_Aktif === 'Nonaktif' ? '<span class="badge b-bad">Nonaktif</span>' : ''}<span class="spacer"></span>
-          ${Pages.kurikulum.canEks(m) ? `<button class="icon-btn sm" aria-label="Ubah materi ekstrakurikuler" onclick="Pages.kurikulum.materiForm('${m.ID_Materi}')"><i class="bi bi-pencil"></i></button><button class="icon-btn sm" aria-label="Hapus materi ekstrakurikuler" title="Hapus" onclick="Pages.kurikulum.removeMateri('${m.ID_Materi}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>
+          ${Pages.kurikulum.canEks(m) ? `<button class="icon-btn sm" aria-label="Lampiran materi ekstrakurikuler" title="Lampiran file" onclick="Lampiran.open('materi','${m.ID_Materi}')"><i class="bi bi-paperclip"></i></button><button class="icon-btn sm" aria-label="Ubah materi ekstrakurikuler" onclick="Pages.kurikulum.materiForm('${m.ID_Materi}')"><i class="bi bi-pencil"></i></button><button class="icon-btn sm" aria-label="Hapus materi ekstrakurikuler" title="Hapus" onclick="Pages.kurikulum.removeMateri('${m.ID_Materi}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>
         <div class="card-title">${esc(m.Nama_Materi)}</div>
         ${m.Deskripsi ? `<p class="muted small">${esc(m.Deskripsi)}</p>` : ''}
+        ${Lampiran.chips(m.Lampiran)}
         <div class="tiny muted"><i class="bi bi-people"></i> ${m.ID_Kelompok === KEL_SEMUA || !m.ID_Kelompok ? 'Semua kelompok' : esc(Store.kelName(m.ID_Kelompok))}</div>
       </div>`;
     const eksSection = dewasa ? '' : `
-      <div class="card-head section-gap" style="padding:0;margin-bottom:12px"><div><div class="card-title"><i class="bi bi-stars"></i> Materi Ekstrakurikuler — ${esc(jj)}</div><div class="card-sub">Ditambahkan Master Admin (semua kelompok) atau Guru pengajar jenjang ini (kelompoknya). Bisa dipilih saat membuat sesi kegiatan, tanpa target pencapaian.</div></div>
+      <div class="card-head section-gap" style="padding:0;margin-bottom:12px"><div><div class="card-title"><i class="bi bi-stars"></i> Materi Ekstrakurikuler — ${esc(jj)}</div><div class="card-sub">Ditambahkan Master Admin / Admin PPG (semua kelompok) atau Guru pengajar jenjang ini (kelompoknya). Bisa dipilih saat membuat sesi kegiatan, tanpa target pencapaian.</div></div>
         ${canEks ? `<button class="btn btn-gold btn-sm" onclick="Pages.kurikulum.materiForm(null, true)"><i class="bi bi-plus-lg"></i> Tambah Ekstrakurikuler</button>` : ''}</div>
       ${eks.length ? `<div class="grid-3">${eks.map(ekCard).join('')}</div>` : `<div class="card">${emptyState('bi-stars', 'Belum ada materi ekstrakurikuler untuk jenjang ini.')}</div>`}`;
     $('#page-kurikulum').innerHTML = pageHead('Pembinaan <i class="bi bi-chevron-right"></i> <b>Kurikulum & Materi</b>', 'Kurikulum & Materi',
-      `Materi dan target pencapaian ${JENJANG_TARGET.length} jenjang (Balita–Usia Nikah) disusun Master Admin (seragam semua kelompok). Materi Dewasa disusun Admin Kelompok masing-masing.`,
+      `Materi dan target pencapaian ${JENJANG_TARGET.length} jenjang (Balita–Usia Nikah) disusun Master Admin / Admin PPG (seragam semua kelompok). Materi Dewasa disusun Admin Kelompok masing-masing.`,
       (canEdit ? `<button class="btn btn-primary" onclick="Pages.kurikulum.materiForm()"><i class="bi bi-plus-lg"></i> Tambah Materi ${esc(jj)}${jj === 'Caberawit' && kf !== 'ALL' ? ' · Kelas ' + kf : ''}</button>` : '') +
-      (canEks ? `<button class="btn btn-gold" onclick="Pages.kurikulum.materiForm(null, true)"><i class="bi bi-stars"></i> Tambah Ekstrakurikuler</button>` : '')) + `
+      (canEks ? `<button class="btn btn-gold" onclick="Pages.kurikulum.materiForm(null, true)"><i class="bi bi-stars"></i> Tambah Ekstrakurikuler</button>` : '') +
+      (Store.isAdm() ? `<button class="btn btn-light" onclick="KurImpor.open()"><i class="bi bi-file-earmark-arrow-up"></i> Impor Excel</button>` : '')) + `
       <div class="tabs" role="tablist">${Store.jj().map(j => `<button role="tab" aria-selected="${j === jj}" class="${j === jj ? 'active' : ''}" onclick="S.ui.kur.jenjang='${j}';Pages.kurikulum.render()">${esc(j)} <span class="badge ${j === jj ? 'b-ok' : 'b-outline'}">${S.d.materi.filter(m => m.Jenjang === j && (j !== 'Dewasa' || Store.inScope(m))).length}</span></button>`).join('')}</div>
       ${jj === 'Caberawit' ? `<div class="chips mb-3" role="tablist" aria-label="Filter kelas materi">
         <button class="chip ${kf === 'ALL' ? 'active' : ''}" onclick="S.ui.kur.kelas='ALL';Pages.kurikulum.render()"><i class="bi bi-mortarboard"></i> Semua Kelas <span class="count">${S.d.materi.filter(m => m.Jenjang === 'Caberawit').length}</span></button>
         ${KELAS.map(k => `<button class="chip ${kf === k ? 'active' : ''}" onclick="S.ui.kur.kelas='${k}';Pages.kurikulum.render()">Kelas ${k} <span class="count">${S.d.materi.filter(m => m.Jenjang === 'Caberawit' && (!m.Kelas || m.Kelas === k)).length}</span></button>`).join('')}</div>` : ''}
       <div class="note ${dewasa ? 'gold' : ''} mb-3"><i class="bi ${dewasa ? 'bi-people' : 'bi-shield-check'}"></i><div>${dewasa
         ? `<b>Jenjang Dewasa</b> memakai kajian tematik mandiri. Materi disusun oleh <b>Admin Kelompok</b> untuk kelompoknya sendiri, <b>tanpa target pencapaian</b>.${master ? ' Anda (Master Admin) dapat melihat dan menghapus materi semua kelompok.' : ''}`
-        : `Dikelola <b>Master Admin (Pusat)</b> · ${mats.length} materi · ${tgCount(jj)} target aktif.${master ? '' : guru ? ' Guru dapat memilih materi ini saat membuat sesi dan mencatat capaiannya.' : ' Admin Kelompok dapat memilih materi ini saat membuat kegiatan.'}`}</div></div>
+        : `Dikelola <b>Master Admin / Admin PPG (Pusat)</b> · ${mats.length} materi · ${tgCount(jj)} target aktif.${master ? '' : guru ? ' Guru dapat memilih materi ini saat membuat sesi dan mencatat capaiannya.' : ' Admin Kelompok dapat memilih materi ini saat membuat kegiatan.'}`}</div></div>
       ${mats.length ? `<div class="grid-3">${mats.map(card).join('')}</div>` : `<div class="card">${emptyState('bi-journal-x', dewasa && master ? 'Belum ada materi Dewasa dari kelompok.' : 'Belum ada materi untuk jenjang ini.')}</div>`}${eksSection}`;
   },
   /** Boleh ubah/hapus materi ekskul m? */
   canEks(m) {
-    if (Store.isMaster()) return true;
+    if (Store.isAdm()) return m.Jenjang !== 'Dewasa' || Store.isMaster();
     if (!Store.isGuru() || !Store.guruJJ().includes(m.Jenjang)) return false;
     return Store.guruSemua() || String(m.ID_Kelompok) === Store.myKel();
   },
@@ -1469,7 +1703,7 @@ Pages.kurikulum = {
       if ((!eks && !fd.Kategori.trim()) || !fd.Nama_Materi.trim()) { const e = $('#matErr', m.el); e.textContent = eks ? 'Nama materi wajib diisi.' : 'Kategori dan nama materi wajib diisi.'; e.hidden = false; return; }
       if (eks && !fd.Kategori.trim()) fd.Kategori = 'Ekstrakurikuler';
       const rec = Object.assign(eks
-        ? { ID_Materi: m0 ? m0.ID_Materi : uid('EKS'), Jenjang: jj, Pengelola: 'Ekskul', ID_Kelompok: m0 ? m0.ID_Kelompok : (Store.isMaster() || Store.guruSemua() ? KEL_SEMUA : Store.myKel()) }
+        ? { ID_Materi: m0 ? m0.ID_Materi : uid('EKS'), Jenjang: jj, Pengelola: 'Ekskul', ID_Kelompok: m0 ? m0.ID_Kelompok : (Store.isAdm() || Store.guruSemua() ? KEL_SEMUA : Store.myKel()) }
         : { ID_Materi: m0 ? m0.ID_Materi : uid('MAT'), Jenjang: jj, Pengelola: jj === 'Dewasa' ? 'Kelompok' : 'Pusat', ID_Kelompok: jj === 'Dewasa' ? Store.myKel() : '' }, fd, { Kelas: jj === 'Caberawit' ? (fd.Kelas || '') : '' });
       m.close();
       const prev = S.d.materi;
@@ -1587,6 +1821,7 @@ Pages.kegiatan = {
   absStatus(k) {
     const m = S.idx.abs.get(k.ID_Kegiatan);
     const n = m ? m.size : 0, h = m ? Array.from(m.values()).filter(v => v.s === 'H').length : 0;
+    if (!n && !Store.absKnown(k.Tanggal)) return k.Status_Absensi === 'Terkunci' ? '<span class="badge b-ok"><i class="bi bi-lock-fill"></i> Terkunci</span>' : '<span class="badge b-outline" title="Riwayat lama — buka Absensi untuk melihat">Arsip</span>';
     if (k.Status_Absensi === 'Terkunci') return `<span class="badge b-ok"><i class="bi bi-lock-fill"></i> Terkunci · ${h}/${n}</span>`;
     if (n) return `<span class="badge b-warn"><span class="dot"></span>Tersimpan · ${h}/${n}</span>`;
     return k.Tanggal > D.today() ? '<span class="badge b-outline">Terjadwal</span>' : '<span class="badge b-bad"><span class="dot"></span>Belum diabsen</span>';
@@ -1595,12 +1830,12 @@ Pages.kegiatan = {
     const f = S.ui.keg, today = D.today(), q = f.q.trim().toLowerCase();
     const list = Store.kegScope().filter(k =>
       (f.bulan === 'ALL' || String(k.Tanggal).slice(0, 7) === f.bulan) && (f.jenjang === 'ALL' || k.Jenjang === f.jenjang) &&
-      (f.status === 'ALL' || (f.status === 'up' ? k.Tanggal >= today : f.status === 'todo' ? (k.Tanggal <= today && !S.idx.abs.get(k.ID_Kegiatan)) : k.Status_Absensi === 'Terkunci')) &&
+      (f.status === 'ALL' || (f.status === 'up' ? k.Tanggal >= today : f.status === 'todo' ? (k.Tanggal <= today && Store.absKnown(k.Tanggal) && !S.idx.abs.get(k.ID_Kegiatan)) : k.Status_Absensi === 'Terkunci')) &&
       (!q || (k.Nama_Kegiatan + ' ' + k.Tempat + ' ' + k.Pengajar + ' ' + (k.Kelas || '')).toLowerCase().includes(q)));
     const up = list.filter(k => k.Tanggal >= today).sort((a, b) => (a.Tanggal + a.Waktu_Mulai).localeCompare(b.Tanggal + b.Waktu_Mulai));
     const past = list.filter(k => k.Tanggal < today).sort((a, b) => (b.Tanggal + b.Waktu_Mulai).localeCompare(a.Tanggal + a.Waktu_Mulai));
     const all = Stats.kegMonth(f.bulan === 'ALL' ? D.ym(new Date()) : f.bulan);
-    const todo = Store.kegScope().filter(k => k.Tanggal <= today && !S.idx.abs.get(k.ID_Kegiatan)).length;
+    const todo = Store.kegScope().filter(k => k.Tanggal <= today && Store.absKnown(k.Tanggal) && !S.idx.abs.get(k.ID_Kegiatan)).length;
 
     const row = k => {
       const mat = S.idx.mat.get(k.ID_Materi);
@@ -1613,7 +1848,7 @@ Pages.kegiatan = {
         <td data-label="Pengajar">${esc(kegMateri(k).map(x => x.guru).filter(Boolean).join(', ') || '–')}</td>
         <td data-label="Absensi">${Pages.kegiatan.absStatus(k)}</td>
         <td class="actions"><button class="btn btn-soft btn-sm" onclick="S.ui.abs.kegId='${k.ID_Kegiatan}';Router.go('absensi')"><i class="bi bi-clipboard-check"></i> Absensi</button><button class="icon-btn sm" aria-label="Kirim jadwal sesi ini via WhatsApp" title="Kirim via WA" onclick="JadwalWA.open(['${k.ID_Kegiatan}'])"><i class="bi bi-whatsapp" style="color:#25D366"></i></button>
-          ${(isGab(k) ? !Store.canGab() : Store.isPenerobos()) ? '' : `<button class="icon-btn sm" aria-label="Ubah kegiatan" onclick="Pages.kegiatan.form('${k.ID_Kegiatan}')"><i class="bi bi-pencil"></i></button><button class="icon-btn sm" aria-label="Hapus sesi" title="Hapus sesi" onclick="Pages.kegiatan.remove('${k.ID_Kegiatan}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>`}</td></tr>`;
+          ${(isGab(k) ? !Store.canGab() : Store.isPenerobos() || (Store.isGuru() && !Store.guruJJ().includes(k.Jenjang))) ? '' : `<button class="icon-btn sm" aria-label="Ubah kegiatan" onclick="Pages.kegiatan.form('${k.ID_Kegiatan}')"><i class="bi bi-pencil"></i></button><button class="icon-btn sm" aria-label="Hapus sesi" title="Hapus sesi" onclick="Pages.kegiatan.remove('${k.ID_Kegiatan}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>`}</td></tr>`;
     };
     const table = (title, rows, icon) => `<div class="card flush section-gap"><div class="card-head" style="padding:18px 20px 0"><div class="card-title"><i class="bi ${icon}"></i> ${title} <span class="badge b-outline">${rows.length}</span></div></div>
       ${rows.length ? `<div class="table-wrap"><table class="table stack"><thead><tr><th>Tanggal & Waktu</th><th>Kegiatan & Materi</th><th>Jenjang</th><th>Kelompok & Tempat</th><th>Pengajar</th><th>Absensi</th><th class="actions">Aksi</th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table></div>` : emptyState('bi-calendar', 'Tidak ada kegiatan.')}</div>`;
@@ -1631,7 +1866,7 @@ Pages.kegiatan = {
       <div class="card section-gap"><div class="toolbar">
         <label class="search-input"><i class="bi bi-search"></i><input class="input" id="kgSearch" placeholder="Cari kegiatan, tempat, pengajar…" value="${attr(f.q)}"></label>
         <select class="select" onchange="S.ui.keg.bulan=this.value;Pages.kegiatan.render()" aria-label="Bulan">${opt('ALL', 'Semua Bulan', f.bulan)}${monthOptions(f.bulan)}</select>
-        <select class="select" onchange="S.ui.keg.jenjang=this.value;Pages.kegiatan.render()" aria-label="Jenjang">${opt('ALL', 'Semua Jenjang', f.jenjang)}${Store.jj().concat([GABUNGAN]).map(j => opt(j, j, f.jenjang)).join('')}</select>
+        <select class="select" onchange="S.ui.keg.jenjang=this.value;Pages.kegiatan.render()" aria-label="Jenjang">${opt('ALL', 'Semua Jenjang', f.jenjang)}${Store.jjAbs().concat([GABUNGAN]).map(j => opt(j, j, f.jenjang)).join('')}</select>
         <select class="select" onchange="S.ui.keg.status=this.value;Pages.kegiatan.render()" aria-label="Status">${opt('ALL', 'Semua Status', f.status)}${opt('up', 'Mendatang', f.status)}${opt('todo', 'Belum diabsen', f.status)}${opt('lock', 'Terkunci', f.status)}</select>
       </div></div>
       ${up.length || f.status === 'up' ? table('Jadwal Mendatang', up, 'bi-calendar-event') : ''}
@@ -1642,9 +1877,9 @@ Pages.kegiatan = {
   async remove(id) {
     const k = S.idx.keg.get(id);
     if (!k) return;
-    if (k.Status_Absensi === 'Terkunci' && !Store.isMaster() && !(isGab(k) && Store.canGab())) { UI.toast('Absensi sesi ini sudah dikunci. Minta Master Admin membuka kunci sebelum menghapus.', 'warn'); return; }
+    if (k.Status_Absensi === 'Terkunci' && !Store.isAdm() && !(isGab(k) && Store.canGab())) { UI.toast('Absensi sesi ini sudah dikunci. Minta Master Admin / Admin PPG membuka kunci sebelum menghapus.', 'warn'); return; }
     const nAbs = (S.idx.abs.get(id) || new Map()).size, inf = S.idx.infKeg.get(id);
-    const info = [nAbs ? `<b>${nAbs} data absensi</b>` : '', inf ? `<b>infaq ${F.rp(inf.Jumlah)}</b>` : ''].filter(Boolean).join(' dan ');
+    const info = [nAbs ? `<b>${nAbs} data absensi</b>` : !Store.absKnown(k.Tanggal) ? '<b>seluruh data absensi</b>' : '', inf ? `<b>infaq ${F.rp(inf.Jumlah)}</b>` : ''].filter(Boolean).join(' dan ');
     if (!(await UI.confirm(`Hapus sesi <b>${esc(k.Nama_Kegiatan)}</b> (${D.short(k.Tanggal)} ${esc(k.Waktu_Mulai)})?${info ? ' ' + info + ' sesi ini ikut terhapus.' : ''} Tindakan ini tidak bisa dikembalikan.`, { ok: 'Hapus Sesi', danger: true }))) return;
     const pk = S.d.kegiatan, pa = S.d.absensi, pi = S.d.infaq;
     App.mutate({
@@ -1867,12 +2102,13 @@ Pages.absensi = {
     Object.keys(d).forEach(j => { if (d[j].dirty) dirty[j] = { s: d[j].s, c: d[j].c }; });
     if (Object.keys(dirty).length) LS.setJson('an_draft_' + k.ID_Kegiatan, dirty); else LS.del('an_draft_' + k.ID_Kegiatan);
   },
-  locked(k) { return !Store.isMaster() && !(isGab(k) && Store.isPenerobos()) && k.Status_Absensi === 'Terkunci'; },
+  locked(k) { return !Store.isAdm() && !(isGab(k) && Store.isPenerobos()) && k.Status_Absensi === 'Terkunci'; },
 
   render() {
     const el = $('#page-absensi');
     if (!S.ui.abs.kegId || !S.idx.keg.has(S.ui.abs.kegId) || !Store.inScope(S.idx.keg.get(S.ui.abs.kegId))) S.ui.abs.kegId = Pages.absensi.pickDefault();
     const k = S.idx.keg.get(S.ui.abs.kegId);
+    if (k && !Store.absGate(k.Tanggal, () => { if (S.page === 'absensi') Pages.absensi.render(); }, el)) return;
     const head = pageHead('Kegiatan <i class="bi bi-chevron-right"></i> <b>Absensi Cepat</b>', 'Kegiatan Pengajian & Lembar Absensi Cepat',
       'Pencatatan kehadiran jamaah per jenjang & kelompok. Ketuk H/I/S/A — tersimpan sebagai draf di perangkat, lalu kirim sekaligus ke Google Sheets.',
       k ? `<button class="btn btn-light" onclick="Pages.absensi.pickSession()"><i class="bi bi-arrow-left-right"></i> Pilih Sesi Lain</button>
@@ -1907,7 +2143,7 @@ Pages.absensi = {
         </div>
       </div>
       ${isGab(k) ? `<div class="note gold section-gap"><i class="bi bi-people-fill"></i><div><b>${esc(gabJenis(k)[1])}</b> (pengajian gabungan) — daftar hadir berisi: <b>${esc(gabJenis(k)[2])}</b>${tambahan(k).length ? ` + <b>${tambahan(k).length} peserta tambahan</b>` : ''}. ${Store.allKel() ? 'Gunakan filter kelompok/jenjang untuk mempercepat pengisian; "Tandai Semua Hadir" berlaku untuk daftar yang sedang tampil.' : Store.isGuru() ? `Anda mengabsen peserta dari jenjang yang Anda ajar (${esc(Store.guruJJ().join(', '))}) di ${esc(Store.kelName(Store.myKel()))}. Peserta lain diabsen admin/guru masing-masing.` : `Anda mengabsen peserta dari kelompok <b>${esc(Store.kelName(Store.myKel()))}</b>. Kelompok lain diabsen admin kelompoknya masing-masing.`}${Store.canGab() ? '' : ' Penguncian absensi dilakukan Master Admin / Penerobos Desa.'}</div></div>` : ''}
-      ${k.Status_Absensi === 'Terkunci' ? `<div class="lock-banner section-gap"><i class="bi bi-lock-fill"></i><span class="grow">Absensi sesi ini sudah dikunci${lockedForMe ? '. Hubungi Master Admin bila perlu koreksi.' : '. Sebagai Master Admin Anda tetap bisa mengoreksi atau membuka kunci.'}</span>${Store.isMaster() || (isGab(k) && Store.isPenerobos()) ? '<button class="btn btn-light btn-sm" onclick="Pages.absensi.unlock()"><i class="bi bi-unlock"></i> Buka Kunci</button>' : ''}</div>` : ''}
+      ${k.Status_Absensi === 'Terkunci' ? `<div class="lock-banner section-gap"><i class="bi bi-lock-fill"></i><span class="grow">Absensi sesi ini sudah dikunci${lockedForMe ? '. Hubungi Master Admin / Admin PPG bila perlu koreksi.' : '. Sebagai ' + (Store.isSuper() ? 'Admin PPG' : 'Master Admin') + ' Anda tetap bisa mengoreksi atau membuka kunci.'}</span>${Store.isAdm() || (isGab(k) && Store.isPenerobos()) ? '<button class="btn btn-light btn-sm" onclick="Pages.absensi.unlock()"><i class="bi bi-unlock"></i> Buka Kunci</button>' : ''}</div>` : ''}
       <div class="grid-5 section-gap" id="absKpi"></div>
       <div class="card section-gap">
         <div class="toolbar">
@@ -1915,7 +2151,7 @@ Pages.absensi = {
           <button class="btn btn-mint" onclick="Pages.absensi.allHadir()" ${lockedForMe ? 'disabled' : ''}><i class="bi bi-lightning-charge-fill"></i> Tandai Semua Hadir</button>
           <label class="search-input"><i class="bi bi-search"></i><input class="input" id="absSearch" placeholder="Cari nama jamaah di sesi ini…" value="${attr(S.ui.abs.q)}"></label>
           ${isGab(k) ? `${Store.allKel() ? `<select class="select" aria-label="Filter kelompok" onchange="S.ui.abs.gk=this.value;Pages.absensi.refreshParts()">${opt('ALL', 'Semua Kelompok', S.ui.abs.gk || 'ALL')}${S.d.kelompok.map(x => opt(x.ID_Kelompok, x.Nama_Kelompok, S.ui.abs.gk || 'ALL')).join('')}</select>` : ''}
-          <select class="select" aria-label="Filter jenjang" onchange="S.ui.abs.gj=this.value;Pages.absensi.refreshParts()">${opt('ALL', 'Semua Jenjang', S.ui.abs.gj || 'ALL')}${Store.jj().map(x => opt(x, x, S.ui.abs.gj || 'ALL')).join('')}</select>` : ''}
+          <select class="select" aria-label="Filter jenjang" onchange="S.ui.abs.gj=this.value;Pages.absensi.refreshParts()">${opt('ALL', 'Semua Jenjang', S.ui.abs.gj || 'ALL')}${Store.jjAbs().map(x => opt(x, x, S.ui.abs.gj || 'ALL')).join('')}</select>` : ''}
           <div class="seg-tabs" id="absTabs"></div>
           <button class="btn btn-primary" id="absSaveTop" onclick="Pages.absensi.save(false, this)" ${lockedForMe ? 'disabled' : ''}><i class="bi bi-floppy"></i> Simpan Massal</button>
         </div>
@@ -2037,13 +2273,13 @@ Pages.absensi = {
 
   infaqCard(k, inf) {
     if (isGab(k)) return `<div class="row"><i class="bi bi-cash-stack" style="color:var(--gold);font-size:20px"></i><div class="card-title grow">Infaq Pengajian</div></div><p class="muted small mt-2">Pengajian gabungan tidak dicatat di kas kelompok. Infaq dicatat per sesi kelompok oleh Admin Kelompok.</p>`;
-    const isAdmin = !Store.allKel();
+    const isAdmin = Store.canInfaq() && Store.infOk(k);
     return `<div class="row"><i class="bi bi-cash-stack" style="color:var(--gold);font-size:20px"></i><div class="card-title grow">Infaq Pengajian Sesi Ini</div><span class="badge b-gold">Kas Kelompok</span></div>
       <p class="muted small mt-1">Total infaq yang terkumpul pada sesi ini (bukan per jamaah), disinkronkan ke sheet <i>Infaq Kelompok</i>.</p>
       ${isAdmin ? `<label class="field mt-3"><span class="field-label">Nominal masuk (IDR)</span><div class="input-money"><span>Rp</span><input class="input" id="absInfAmt" inputmode="numeric" placeholder="0" value="${inf ? F.num(inf.Jumlah) : ''}" oninput="this.value=this.value.replace(/[^\\d]/g,'').replace(/\\B(?=(\\d{3})+(?!\\d))/g,'.')"></div></label>
         <label class="field mt-2"><span class="field-label">Keterangan</span><input class="input" id="absInfKet" maxlength="200" value="${attr(inf ? inf.Keterangan : 'Infaq kaleng keliling')}"></label>
         <div class="row mt-3"><span class="tiny muted">${inf ? 'Tercatat ' + F.rp(inf.Jumlah) : 'Belum dicatat'}</span><span class="spacer"></span><button class="btn btn-gold btn-sm" onclick="Pages.absensi.saveInfaq()"><i class="bi bi-check2"></i> Simpan Infaq</button></div>`
-      : `<div class="kpi-value mt-3" style="color:var(--primary)">${inf ? F.rp(inf.Jumlah) : '<span class="muted" style="font-size:16px">Belum dicatat</span>'}</div><p class="tiny muted mt-2"><i class="bi bi-eye"></i> Master Admin hanya melihat. Infaq dicatat oleh Admin Kelompok.</p>`}`;
+      : `<div class="kpi-value mt-3" style="color:var(--primary)">${inf ? F.rp(inf.Jumlah) : '<span class="muted" style="font-size:16px">Belum dicatat</span>'}</div><p class="tiny muted mt-2"><i class="bi bi-eye"></i> ${Store.isGuru() ? 'Infaq pengajian ' + esc(k.Jenjang) + ' dicatat oleh Admin Kelompok.' : 'Hanya melihat. Infaq dicatat oleh Admin Kelompok / Guru.'}</p>`}`;
   },
   saveInfaq() {
     const k = S.idx.keg.get(S.ui.abs.kegId);
@@ -2130,7 +2366,7 @@ Pages.capaian = {
 
     $('#page-capaian').innerHTML = pageHead('Pembinaan <i class="bi bi-chevron-right"></i> <b>Capaian Jamaah</b>', 'Monitoring Kurikulum & Capaian Jamaah',
       `Pemantauan progres target kompetensi kurikulum per jamaah dari ${JENJANG_TARGET.length} jenjang berjenjang. Dewasa tidak memakai target.`,
-      `<button class="btn btn-light" onclick="Pages.capaian.exportXlsx()"><i class="bi bi-file-earmark-excel"></i> Unduh Rekap (Excel)</button>${Store.isMaster() ? `<button class="btn btn-primary" onclick="S.ui.kur.jenjang='${f.jenjang}';Router.go('kurikulum')"><i class="bi bi-sliders"></i> Atur Target Kurikulum</button>` : ''}`) + `
+      `<button class="btn btn-light" onclick="Pages.capaian.exportXlsx()"><i class="bi bi-file-earmark-excel"></i> Unduh Rekap (Excel)</button>${Store.isAdm() ? `<button class="btn btn-primary" onclick="S.ui.kur.jenjang='${f.jenjang}';Router.go('kurikulum')"><i class="bi bi-sliders"></i> Atur Target Kurikulum</button>` : ''}`) + `
       <div class="chips mb-3">${JENJANG_TARGET.filter(j => Store.jj().includes(j)).map(j => { const c = Stats.jenjangCapaian(j); return `<button class="chip ${f.jenjang === j ? 'active' : ''}" onclick="S.ui.cap.jenjang='${j}';S.ui.cap.page=1;Pages.capaian.render()"><i class="bi bi-mortarboard"></i> ${esc(j)} <span class="count">${F.pct(c.pct, 1)}</span></button>`; }).join('')}
         ${Store.jj().includes('Dewasa') ? `<button class="chip" onclick="S.ui.kur.jenjang='Dewasa';Router.go('kurikulum')"><i class="bi bi-people"></i> Dewasa <span class="count">tematik</span></button>` : ''}</div>
       <div class="grid-4">
@@ -2248,10 +2484,10 @@ Pages.capaian = {
 /* ───────────────────────── INFAQ ───────────────────────── */
 Pages.infaq = {
   render() {
-    const f = S.ui.inf, ym = f.bulan, prev = D.addMonths(ym, -1), master = Store.allKel();
+    const f = S.ui.inf, ym = f.bulan, prev = D.addMonths(ym, -1), master = !Store.canInfaq();
     const list = Stats.infMonth(ym).sort((a, b) => String(b.Tanggal).localeCompare(String(a.Tanggal)));
     const total = sum(list, i => i.Jumlah), totalPrev = sum(Stats.infMonth(prev), i => i.Jumlah);
-    const held = Stats.held(Stats.kegMonth(ym));
+    const held = Stats.held(Stats.kegMonth(ym)).filter(Store.infOk);
     const noInf = held.filter(k => !S.idx.infKeg.has(k.ID_Kegiatan));
     const perKel = {};
     list.forEach(i => { const p = perKel[i.ID_Kelompok] = perKel[i.ID_Kelompok] || { amt: 0, n: 0 }; p.amt += i.Jumlah; p.n++; });
@@ -2262,7 +2498,7 @@ Pages.infaq = {
 
     $('#page-infaq').innerHTML = pageHead('Keuangan & Laporan <i class="bi bi-chevron-right"></i> <b>Infaq Pengajian</b>', 'Infaq Pengajian & Rekap',
       'Pencatatan infaq masuk per kegiatan pengajian kelompok, tersinkron otomatis ke Google Sheets & Drive.',
-      `<button class="btn btn-light" onclick="Pages.laporan.pdf('infaq',{bulan:'${ym}',ID_Kelompok:${master && Store.scopeKel() !== 'ALL' ? `'${Store.scopeKel()}'` : "''"}},this)"><i class="bi bi-file-earmark-pdf"></i> Unduh Rekap PDF</button>
+      `${Store.isGuru() ? '' : `<button class="btn btn-light" onclick="Pages.laporan.pdf('infaq',{bulan:'${ym}',ID_Kelompok:${Store.allKel() && Store.scopeKel() !== 'ALL' ? `'${Store.scopeKel()}'` : "''"}},this)"><i class="bi bi-file-earmark-pdf"></i> Unduh Rekap PDF</button>`}
        <button class="btn btn-light" onclick="Pages.infaq.exportXlsx()"><i class="bi bi-file-earmark-excel"></i> Ekspor Excel</button>
        ${master ? '' : '<button class="btn btn-primary" onclick="Pages.infaq.form()"><i class="bi bi-plus-circle"></i> Catat Infaq Baru</button>'}`) + `
       <div class="card"><div class="toolbar">
@@ -2309,7 +2545,7 @@ Pages.infaq = {
   form(id, kegId) {
     const i0 = id ? S.d.infaq.find(x => x.ID_Infaq === id) : null;
     const today = D.today();
-    const keg = Store.kegScope().filter(k => k.Tanggal <= today && !isGab(k)).sort((a, b) => (b.Tanggal + b.Waktu_Mulai).localeCompare(a.Tanggal + a.Waktu_Mulai)).slice(0, 120);
+    const keg = Store.kegScope().filter(k => k.Tanggal <= today && Store.infOk(k)).sort((a, b) => (b.Tanggal + b.Waktu_Mulai).localeCompare(a.Tanggal + a.Waktu_Mulai)).slice(0, 120);
     const sel = i0 ? i0.ID_Kegiatan : (kegId || (keg.find(k => !S.idx.infKeg.has(k.ID_Kegiatan)) || {}).ID_Kegiatan || '');
     const m = UI.modal({
       title: i0 ? 'Ubah Catatan Infaq' : 'Catat Infaq Pengajian',
@@ -2548,7 +2784,7 @@ Pages.pengguna = {
   render() {
     const us = S.d.pengguna, q = S.ui.usr.q.trim().toLowerCase();
     const rows = us.filter(u => !q || (u.Nama + ' ' + u.Email + ' ' + Store.kelName(u.ID_Kelompok)).toLowerCase().includes(q)).sort((a, b) => a.Peran.localeCompare(b.Peran) || a.Nama.localeCompare(b.Nama));
-    const nM = us.filter(u => u.Peran === 'Master Admin').length, nS = us.filter(u => u.Peran === 'Super Admin').length, nG = us.filter(u => u.Peran === 'Guru').length, nA = us.filter(u => u.Peran === 'Admin Kelompok').length, off = us.filter(u => u.Status_Aktif !== 'Aktif').length;
+    const nM = us.filter(u => u.Peran === 'Master Admin').length, nS = us.filter(u => u.Peran === 'Admin PPG' || u.Peran === 'Super Admin').length, nG = us.filter(u => u.Peran === 'Guru').length, nA = us.filter(u => u.Peran === 'Admin Kelompok').length, off = us.filter(u => u.Status_Aktif !== 'Aktif').length;
     $('#page-pengguna').innerHTML = pageHead('Sistem <i class="bi bi-chevron-right"></i> <b>Kelola Pengguna & Hak Akses</b>', 'Kelola Pengguna & Hak Akses (RBAC)',
       'Akun pengelola dengan pembagian wewenang berdasarkan peran dan kelompok. Pembatasan diverifikasi di server, bukan hanya disembunyikan di tampilan.',
       `<button class="btn btn-primary" onclick="Pages.pengguna.form()"><i class="bi bi-person-plus"></i> Tambah Pengguna</button>`) + `
@@ -2562,12 +2798,12 @@ Pages.pengguna = {
         <div class="grid-2">
           <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-gold"><i class="bi bi-shield-lock"></i> Master Admin (Pusat)</span><span class="spacer"></span><span class="tiny muted">Tingkat 1</span></div>
             <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Kelola jamaah, kegiatan, absensi & capaian semua kelompok</li><li><i class="bi bi-check-circle"></i>Susun kurikulum & target ${JENJANG_TARGET.length} jenjang (Balita–Usia Nikah)</li><li><i class="bi bi-check-circle"></i>Kelola pengguna, kelompok, pengaturan, log audit</li><li><i class="bi bi-eye"></i>Lihat saja: materi Dewasa & rekap infaq semua kelompok</li></ul></div>
-          <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-dark"><i class="bi bi-shield-check"></i> Super Admin (Generus)</span><span class="spacer"></span><span class="tiny muted">Tingkat 2</span></div>
-            <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Kelola jamaah, kegiatan, absensi & capaian semua kelompok</li><li><i class="bi bi-check-circle"></i>Jenjang Balita sampai Usia Nikah</li><li><i class="bi bi-eye"></i>Lihat saja: kurikulum pusat & rekap infaq</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak bisa mengakses jenjang Dewasa, pengajian gabungan, akun & pengaturan</li></ul></div>
+          <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-dark"><i class="bi bi-shield-check"></i> Admin PPG (Generus)</span><span class="spacer"></span><span class="tiny muted">Tingkat 2</span></div>
+            <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Seperti Master Admin untuk jenjang Balita–Usia Nikah semua kelompok</li><li><i class="bi bi-check-circle"></i>Susun kurikulum & target, kelola kelompok, pengaturan, buka kunci absensi</li><li><i class="bi bi-eye"></i>Lihat saja: rekap infaq</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak bisa mengelola pengguna, membersihkan data, melihat jenjang Dewasa & pengajian gabungan</li></ul></div>
           <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-primary"><i class="bi bi-person-badge"></i> Admin Kelompok</span><span class="spacer"></span><span class="tiny muted">Tingkat 3</span></div>
             <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Kelola jamaah, kegiatan, absensi & capaian kelompok sendiri</li><li><i class="bi bi-check-circle"></i>Susun materi pengajian Dewasa kelompoknya</li><li><i class="bi bi-check-circle"></i>Catat & ubah infaq pengajian kelompoknya</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak bisa melihat data kelompok lain, kurikulum pusat, akun & pengaturan</li></ul></div>
           <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-primary"><i class="bi bi-mortarboard"></i> Guru Pengajar</span><span class="spacer"></span><span class="tiny muted">Tingkat 4</span></div>
-            <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Kegiatan, absensi & capaian jenjang yang diajar (Balita–Usia Nikah)</li><li><i class="bi bi-check-circle"></i>Tambah materi ekstrakurikuler & tulis buku penghubung</li><li><i class="bi bi-eye"></i>Lihat saja: data jamaah & kurikulum pusat</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak bisa mengubah data jamaah, PIN, infaq, laporan, akun & pengaturan</li></ul></div>
+            <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Kegiatan & capaian jenjang yang diajar (Balita–Usia Nikah)</li><li><i class="bi bi-check-circle"></i>Absensi semua pengajian kelompoknya (termasuk Dewasa)</li><li><i class="bi bi-check-circle"></i>Catat infaq pengajian Balita–Usia Nikah</li><li><i class="bi bi-check-circle"></i>Tambah materi ekstrakurikuler & tulis buku penghubung</li><li><i class="bi bi-eye"></i>Lihat saja: data jamaah & kurikulum pusat</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak bisa mengubah data jamaah, PIN, laporan, akun & pengaturan</li></ul></div>
           <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-gold"><i class="bi bi-signpost-2"></i> Penerobos Desa</span><span class="spacer"></span><span class="tiny muted">Pengajian gabungan</span></div>
             <ul class="target-list mt-3"><li><i class="bi bi-check-circle"></i>Buat, ubah, hapus & kirim jadwal pengajian gabungan</li><li><i class="bi bi-check-circle"></i>Absen & kunci absensi semua peserta gabungan (semua kelompok)</li><li><i class="bi bi-check-circle"></i>Rekap pengajian gabungan</li><li style="color:var(--bad-text)"><i class="bi bi-x-circle" style="color:var(--bad)"></i>Tidak mengelola sesi kelompok, data jamaah, kurikulum, infaq, akun & pengaturan</li></ul></div>
           <div class="card" style="box-shadow:none;background:var(--surface-2)"><div class="row"><span class="badge b-gold"><i class="bi bi-signpost"></i> Penerobos Kelompok</span><span class="spacer"></span><span class="tiny muted">1 kelompok</span></div>
@@ -2576,8 +2812,8 @@ Pages.pengguna = {
       <div class="card flush section-gap"><div style="padding:16px 20px"><label class="search-input"><i class="bi bi-search"></i><input class="input" id="usrSearch" placeholder="Cari nama, email, atau kelompok…" value="${attr(S.ui.usr.q)}"></label></div>
         <div class="table-wrap"><table class="table stack"><thead><tr><th>Pengguna & Akun</th><th>Peran</th><th>Cakupan Akses</th><th>Terakhir Masuk</th><th>Status</th><th class="actions">Aksi</th></tr></thead><tbody>
         ${rows.map(u => `<tr><td class="td-main"><div class="cell-person"><span class="avatar ${u.Peran === 'Master Admin' || u.Peran === 'Guru' ? 'gold' : ''}">${esc(F.initials(u.Nama))}</span><div><div class="nm">${esc(u.Nama)}${u.Email === S.user.Email ? ' <span class="badge b-outline">Anda</span>' : ''}</div><div class="cell-sub"><i class="bi bi-envelope"></i> ${esc(u.Email)}</div></div></div></td>
-          <td data-label="Peran"><span class="badge ${u.Peran === 'Master Admin' ? 'b-gold' : u.Peran === 'Super Admin' ? 'b-dark' : u.Peran === 'Guru' ? 'b-primary' : u.Peran === 'Penerobos Desa' || u.Peran === 'Penerobos Kelompok' ? 'b-gold' : 'b-mint'}">${esc(u.Peran)}</span></td>
-          <td data-label="Cakupan">${u.Peran === 'Master Admin' ? '<b>Semua Kelompok</b>' : u.Peran === 'Super Admin' ? '<b>Semua Kelompok</b><div class="cell-sub">Generus (tanpa Dewasa)</div>' : u.Peran === 'Penerobos Desa' ? '<b>Semua Kelompok</b><div class="cell-sub">Pengajian gabungan desa</div>' : u.Peran === 'Guru' ? `<b>${u.ID_Kelompok === KEL_SEMUA ? 'Semua Kelompok' : esc(Store.kelName(u.ID_Kelompok))}</b><div class="cell-sub">Mengajar: ${esc(String(u.Jenjang_Ajar || '–').split(',').join(', '))}</div>` : `<b>${esc(Store.kelName(u.ID_Kelompok))}</b><div class="cell-sub">${esc((S.idx.kel.get(u.ID_Kelompok) || {}).Desa_Daerah || '')}</div>`}</td>
+          <td data-label="Peran"><span class="badge ${u.Peran === 'Master Admin' ? 'b-gold' : u.Peran === 'Admin PPG' ? 'b-dark' : u.Peran === 'Guru' ? 'b-primary' : u.Peran === 'Penerobos Desa' || u.Peran === 'Penerobos Kelompok' ? 'b-gold' : 'b-mint'}">${esc(u.Peran)}</span></td>
+          <td data-label="Cakupan">${u.Peran === 'Master Admin' ? '<b>Semua Kelompok</b>' : u.Peran === 'Admin PPG' ? '<b>Semua Kelompok</b><div class="cell-sub">Generus (tanpa Dewasa & gabungan)</div>' : u.Peran === 'Penerobos Desa' ? '<b>Semua Kelompok</b><div class="cell-sub">Pengajian gabungan desa</div>' : u.Peran === 'Guru' ? `<b>${u.ID_Kelompok === KEL_SEMUA ? 'Semua Kelompok' : esc(Store.kelName(u.ID_Kelompok))}</b><div class="cell-sub">Mengajar: ${esc(String(u.Jenjang_Ajar || '–').split(',').join(', '))}</div>` : `<b>${esc(Store.kelName(u.ID_Kelompok))}</b><div class="cell-sub">${esc((S.idx.kel.get(u.ID_Kelompok) || {}).Desa_Daerah || '')}</div>`}</td>
           <td data-label="Terakhir">${u.Terakhir_Login ? esc(D.rel(u.Terakhir_Login)) : '<span class="faint">Belum pernah</span>'}</td>
           <td data-label="Status">${u.Status_Aktif === 'Aktif' ? '<span class="badge b-ok"><span class="dot"></span>Aktif</span>' : '<span class="badge b-bad"><span class="dot"></span>Nonaktif</span>'}</td>
           <td class="actions"><button class="icon-btn sm" aria-label="Ubah ${attr(u.Nama)}" onclick="Pages.pengguna.form('${attr(u.Email)}')"><i class="bi bi-pencil"></i></button>${u.Email === S.user.Email ? '' : `<button class="icon-btn sm" title="Hapus akun" aria-label="Hapus ${attr(u.Nama)}" onclick="Pages.pengguna.remove('${attr(u.Email)}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>`}</td></tr>`).join('')}
@@ -2607,7 +2843,7 @@ Pages.pengguna = {
         <label class="field"><span class="field-label">Email <span class="req">*</span></span><input class="input" type="email" name="Email" value="${attr(u0 ? u0.Email : '')}" ${u0 ? 'readonly' : ''} placeholder="nama@contoh.id"></label>
         <label class="field"><span class="field-label">Nama lengkap & gelar <span class="req">*</span></span><input class="input" name="Nama" maxlength="100" value="${attr(u0 ? u0.Nama : '')}" placeholder="mis. Ust. Muhammad Ilham"></label>
         <div class="field span-2"><span class="field-label">Peran <span class="req">*</span></span><div class="grid-2" style="gap:10px">
-          ${[['Master Admin', 'bi-shield-lock', 'Wewenang penuh semua kelompok.'], ['Super Admin', 'bi-shield-check', 'Semua kelompok, jenjang Balita–Usia Nikah (tanpa Dewasa).'], ['Admin Kelompok', 'bi-person-badge', 'Kelola jamaah, absensi & infaq kelompoknya.'], ['Guru', 'bi-mortarboard', 'Guru pengajar Balita–Usia Nikah: kegiatan, absensi, capaian & materi ekstrakurikuler.'], ['Penerobos Desa', 'bi-signpost-2', 'Buat jadwal pengajian gabungan, absen semua pesertanya & lihat rekapnya.'], ['Penerobos Kelompok', 'bi-signpost', "Jadwal & absensi pengajian kelompoknya, serta jadwal Khotbah Jum'at."]].map(([p, ic, d]) => `<label class="card" style="box-shadow:none;cursor:pointer;padding:14px;${self && p !== 'Master Admin' ? 'opacity:.5;pointer-events:none' : ''}"><span class="row"><input type="radio" name="Peran" value="${p}" ${(u0 ? u0.Peran : 'Admin Kelompok') === p ? 'checked' : ''} style="accent-color:var(--primary)"><b><i class="bi ${ic}"></i> ${p}</b></span><span class="tiny muted">${d}</span></label>`).join('')}</div></div>
+          ${[['Master Admin', 'bi-shield-lock', 'Wewenang penuh semua kelompok.'], ['Admin PPG', 'bi-shield-check', 'Seperti Master Admin untuk Balita–Usia Nikah semua kelompok; tanpa kelola pengguna, Dewasa & pengajian gabungan.'], ['Admin Kelompok', 'bi-person-badge', 'Kelola jamaah, absensi & infaq kelompoknya.'], ['Guru', 'bi-mortarboard', 'Guru pengajar Balita–Usia Nikah: kegiatan, capaian & materi ekstrakurikuler; absensi semua pengajian kelompok & infaq generus.'], ['Penerobos Desa', 'bi-signpost-2', 'Buat jadwal pengajian gabungan, absen semua pesertanya & lihat rekapnya.'], ['Penerobos Kelompok', 'bi-signpost', "Jadwal & absensi pengajian kelompoknya, serta jadwal Khotbah Jum'at."]].map(([p, ic, d]) => `<label class="card" style="box-shadow:none;cursor:pointer;padding:14px;${self && p !== 'Master Admin' ? 'opacity:.5;pointer-events:none' : ''}"><span class="row"><input type="radio" name="Peran" value="${p}" ${(u0 ? u0.Peran : 'Admin Kelompok') === p ? 'checked' : ''} style="accent-color:var(--primary)"><b><i class="bi ${ic}"></i> ${p}</b></span><span class="tiny muted">${d}</span></label>`).join('')}</div></div>
         <label class="field" id="usrKelF"><span class="field-label">Kelompok yang ditugaskan <span class="req">*</span></span><select class="select" name="ID_Kelompok"><option value="${KEL_SEMUA}" id="usrKelAll" ${u0 && u0.ID_Kelompok === KEL_SEMUA ? 'selected' : ''}>Semua Kelompok (khusus Guru)</option>${kelOptions(u0 ? u0.ID_Kelompok : '')}</select></label>
         <div class="field span-2" id="usrJjF"><span class="field-label">Jenjang yang diajar <span class="req">*</span></span><div class="chips">${JENJANG_TARGET.map(j => `<label class="chip" style="cursor:pointer"><input type="checkbox" name="JJA" value="${attr(j)}" ${u0 && String(u0.Jenjang_Ajar || '').split(',').includes(j) ? 'checked' : ''}> ${esc(j)}</label>`).join('')}</div><span class="field-help">Guru hanya melihat dan mengelola kegiatan, absensi, capaian, buku penghubung, serta materi ekstrakurikuler untuk jenjang yang dicentang.</span></div>
         <label class="field"><span class="field-label">Status akun</span><select class="select" name="Status_Aktif" ${self ? 'disabled' : ''}>${opt('Aktif', 'Aktif', u0 ? u0.Status_Aktif : 'Aktif')}${opt('Nonaktif', 'Nonaktif', u0 && u0.Status_Aktif)}</select></label>
@@ -2667,11 +2903,11 @@ Pages.kehadiran = {
   compute() {
     const f = S.ui.khd, [a, b] = Pages.kehadiran.range(f.per), t = D.today();
     const kegOk = new Set(Store.kegScope().filter(k => k.Tanggal >= a && k.Tanggal <= b && k.Tanggal <= t).map(k => k.ID_Kegiatan));
-    const jams = Store.jamaahScope().filter(j => (f.status === 'ALL' || j.Status_Aktif === f.status));
+    const jams = Store.jamaahScope(true, true).filter(j => (f.status === 'ALL' || j.Status_Aktif === f.status));
     const per = new Map(jams.map(j => [j.ID_Jamaah, { j, H: 0, I: 0, S: 0, A: 0, n: 0 }]));
     S.idx.abs.forEach((m, kid) => { if (!kegOk.has(kid)) return; m.forEach((v, jid) => { const r = per.get(jid); if (r && r[v.s] !== undefined) { r[v.s]++; r.n++; } }); });
     per.forEach(r => { r.pct = r.n ? r.H / r.n * 100 : null; });
-    const jj = Store.jj().map(name => {
+    const jj = Store.jjAbs().map(name => {
       const rs = [...per.values()].filter(r => r.j.Jenjang === name);
       const c = { name, H: 0, I: 0, S: 0, A: 0, n: 0, jamaah: rs.length, aktif: rs.filter(r => r.n).length };
       rs.forEach(r => ['H', 'I', 'S', 'A', 'n'].forEach(s => { c[s] += r[s]; }));
@@ -2692,13 +2928,15 @@ Pages.kehadiran = {
     return rs.sort(sorts[f.sort] || sorts.jenjang);
   },
   tabs() {
-    if (Store.isPenerobos()) return '';
+    if (Store.isPenerobos() || Store.isSuper()) return '';
     const md = S.ui.khd.mode;
     return `<div class="tabs" role="tablist" style="margin-bottom:16px"><button role="tab" aria-selected="${md !== 'gab'}" class="${md !== 'gab' ? 'active' : ''}" onclick="S.ui.khd.mode='jenjang';Pages.kehadiran.render()"><i class="bi bi-layers"></i> Per Jenjang & Jamaah</button>
       <button role="tab" aria-selected="${md === 'gab'}" class="${md === 'gab' ? 'active' : ''}" onclick="S.ui.khd.mode='gab';Pages.kehadiran.render()"><i class="bi bi-people-fill"></i> Rekap Pengajian Gabungan</button></div>`;
   },
   render() {
-    if (S.ui.khd.mode === 'gab' || Store.isPenerobos()) return Pages.kehadiran.renderGab();
+    const [awal] = Pages.kehadiran.range(S.ui.khd.per);
+    if (!Store.absGate(awal, () => { if (S.page === 'kehadiran') Pages.kehadiran.render(); }, $('#page-kehadiran'))) return;
+    if ((S.ui.khd.mode === 'gab' && !Store.isSuper()) || Store.isPenerobos()) return Pages.kehadiran.renderGab();
     const f = S.ui.khd, [, , label] = Pages.kehadiran.range(f.per);
     const { per, jj, sesi } = Pages.kehadiran.compute();
     const tot = jj.reduce((o, c) => { ['H', 'I', 'S', 'A', 'n'].forEach(s => { o[s] += c[s]; }); return o; }, { H: 0, I: 0, S: 0, A: 0, n: 0 });
@@ -3831,8 +4069,8 @@ Pages.pengaturan = {
         <div class="row-wrap mt-3"><span class="tiny muted"><i class="bi bi-info-circle"></i> Rentang tidak boleh tumpang tindih. Kosongkan "Maks" Dewasa untuk tanpa batas atas. Jenjang yang diatur manual tidak ikut dihitung ulang.</span><span class="spacer"></span>
           <button class="btn btn-light" onclick="Pages.pengaturan.recalc(this)"><i class="bi bi-arrow-repeat"></i> Hitung Ulang Jenjang Semua</button>
           <button class="btn btn-primary" onclick="Pages.pengaturan.saveUsia(this)"><i class="bi bi-check2-circle"></i> Simpan Rentang Usia</button></div></div>
-      <div class="card section-gap" style="border-color:var(--bad)"><div class="card-head"><div><div class="card-title"><i class="bi bi-eraser"></i> Bersihkan Data</div><div class="card-sub">Hapus data contoh agar aplikasi mulai dari kosong. Kelompok, akun pengguna, dan pengaturan tidak ikut terhapus.</div></div>
-        <button class="btn btn-danger btn-sm" onclick="Pages.pengaturan.clearData()"><i class="bi bi-eraser"></i> Hapus Data Contoh…</button></div></div>
+      ${Store.isMaster() ? `<div class="card section-gap" style="border-color:var(--bad)"><div class="card-head"><div><div class="card-title"><i class="bi bi-eraser"></i> Bersihkan Data</div><div class="card-sub">Hapus data contoh agar aplikasi mulai dari kosong. Kelompok, akun pengguna, dan pengaturan tidak ikut terhapus.</div></div>
+        <button class="btn btn-danger btn-sm" onclick="Pages.pengaturan.clearData()"><i class="bi bi-eraser"></i> Hapus Data Contoh…</button></div></div>` : ''}
       <div class="grid-2 section-gap">
         <div class="card flush"><div class="card-head" style="padding:18px 20px 0"><div><div class="card-title"><i class="bi bi-houses"></i> Kelompok Binaan</div><div class="card-sub">Data kelompok untuk pembagian akses dan laporan</div></div><button class="btn btn-primary btn-sm" onclick="Pages.pengaturan.kelForm()"><i class="bi bi-plus"></i> Kelompok</button></div>
           <div class="table-wrap"><table class="table stack"><thead><tr><th>Kelompok</th><th>Pengurus</th><th>Jamaah</th><th>Status</th><th class="actions"></th></tr></thead><tbody>
