@@ -168,7 +168,7 @@ const API = {
       throw new Error('Alamat backend belum diisi. Isi GAS_URL di file js/config.js dengan URL /exec dari Apps Script.');
     }
     const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timer = ctl ? setTimeout(() => ctl.abort(), 90000) : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), /^apiUpload/.test(name) ? 300000 : 90000) : null; // unggah file besar: 5 menit
     let res;
     try {
       const r = await fetch(GAS_URL, {
@@ -286,7 +286,10 @@ const Store = {
   /** Akun hanya-lihat untuk data induk jamaah (Guru & Penerobos Desa). */
   isPnrKel() { return !!S.user && S.user.Peran === 'Penerobos Kelompok'; },
   /** Boleh mengelola jadwal Khotbah Jum'at. */
-  canJumat() { return Store.isAdm() || (S.user && S.user.Peran === 'Admin Kelompok') || Store.isPnrKel(); },
+  /** Jadwal Jum'at: hanya Master Admin, Admin Kelompok & Penerobos Kelompok. */
+  canJumat() { return Store.isMaster() || (!!S.user && S.user.Peran === 'Admin Kelompok') || Store.isPnrKel(); },
+  /** Infaq Jum'atan dicatat Penerobos Kelompok / Admin Kelompok; Master Admin hanya melihat. */
+  canInfaqJumat() { return (!!S.user && S.user.Peran === 'Admin Kelompok') || Store.isPnrKel(); },
   readOnly() { return Store.isGuru() || Store.isPenerobos() || Store.isPnrKel(); },
   allKel() { return Store.isMaster() || Store.isSuper() || Store.guruSemua() || Store.isPenerobos(); },
   /** Jenjang yang boleh dikelola: Admin PPG tanpa Dewasa; Guru jenjang ajarnya. */
@@ -307,6 +310,7 @@ const Store = {
   load(data) {
     S.d = data;
     S.d.jumat = S.d.jumat || [];
+    S.d.dokumen = S.d.dokumen || [];
     ['jamaah', 'kelompok', 'materi', 'target', 'kegiatan', 'infaq', 'log', 'pengguna', 'absensi', 'capaian', 'buku'].forEach(k => { if (!Array.isArray(S.d[k])) S.d[k] = []; });
     if (!S.d.settings) S.d.settings = { usia: { Caberawit: [4, 11], 'Pra Remaja': [12, 14], Remaja: [15, 18], 'Usia Nikah': [19, 30], Dewasa: [31, ''] } };
     S.d.infaq.forEach(i => { i.Jumlah = Number(i.Jumlah) || 0; });
@@ -643,7 +647,7 @@ const NAV = [
   { id: 'kurikulum', icon: 'bi-journal-bookmark', label: 'Kurikulum & Materi' },
   { id: 'kegiatan', icon: 'bi-calendar3', label: 'Kegiatan & Jadwal' },
   { id: 'absensi', icon: 'bi-check2-square', label: 'Absensi Cepat' },
-  { id: 'jumat', icon: 'bi-moon-stars', label: "Jadwal Jum'at", noGuru: true },
+  { id: 'jumat', icon: 'bi-moon-stars', label: "Jadwal Jum'at", jumat: true },
   { id: 'capaian', icon: 'bi-award', label: 'Capaian Jamaah' },
   { id: 'buku', icon: 'bi-journal-richtext', label: 'Buku Penghubung' },
   { g: 'Keuangan & Laporan' },
@@ -657,7 +661,7 @@ const NAV = [
 const BOTTOM = [['dashboard', 'bi-grid-1x2', 'Beranda'], ['jamaah', 'bi-people', 'Jamaah'], ['absensi', 'bi-check2-square', 'Absensi'], ['capaian', 'bi-award', 'Capaian'], ['__menu', 'bi-list', 'Menu']];
 
 const Router = {
-  allowed(id) { const n = NAV.find(x => x.id === id); return n && (!n.master || Store.isMaster()) && (!n.adm || Store.isAdm()) && (!n.noGuru || !Store.isGuru()) && (!Store.isPenerobos() || PNR_NAV.includes(id)) && (!Store.isPnrKel() || PNRK_NAV.includes(id)); },
+  allowed(id) { const n = NAV.find(x => x.id === id); return n && (!n.master || Store.isMaster()) && (!n.adm || Store.isAdm()) && (!n.noGuru || !Store.isGuru()) && (!n.jumat || Store.canJumat()) && (!Store.isPenerobos() || PNR_NAV.includes(id)) && (!Store.isPnrKel() || PNRK_NAV.includes(id)); },
   go(page, params) {
     if (!Router.allowed(page)) page = 'dashboard';
     S.page = page;
@@ -1446,7 +1450,7 @@ Pages.jamaah = {
 
 /* ───────────────────────── LAMPIRAN FILE (materi & target) ───────────────────────── */
 const Lampiran = {
-  MAKS: 5, MB: 10,
+  MAKS: 5, MB: 25,
   EXT: ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'txt', 'jpg', 'jpeg', 'png', 'webp', 'mp3', 'm4a', 'mp4'],
   list(v) { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } },
   icon(n) {
@@ -1474,7 +1478,7 @@ const Lampiran = {
     const m = UI.modal({
       title: 'Lampiran ' + (jenis === 'materi' ? 'Materi' : 'Target'), size: 'lg',
       body: `<div class="muted small mb-3"><b>${esc(judul)}</b></div><div id="lampBody"></div>
-        <label class="lamp-drop mt-3" id="lampDrop"><i class="bi bi-cloud-arrow-up"></i><div><b>Pilih file untuk diunggah</b><div class="tiny muted">PDF, Word, PowerPoint, Excel, gambar, MP3/MP4 · maks. ${Lampiran.MB} MB per file · maks. ${Lampiran.MAKS} file</div></div>
+        <label class="lamp-drop mt-3" id="lampDrop"><i class="bi bi-cloud-arrow-up"></i><div><b>Pilih file untuk diunggah</b><div class="tiny muted">PDF, JPG/PNG, Excel, Word, PowerPoint, MP3/MP4 · maks. ${Lampiran.MB} MB per file · maks. ${Lampiran.MAKS} file</div></div>
           <input type="file" id="lampFile" multiple hidden accept="${Lampiran.EXT.map(e => '.' + e).join(',')}"></label>
         <div id="lampProg" class="mt-2"></div>
         <p class="tiny muted mt-2"><i class="bi bi-google"></i> File disimpan di folder Drive <b>Ayo Ngaji › Bahan Ajar</b> dan bisa dibuka siapa saja yang memiliki tautannya.</p>`,
@@ -1517,6 +1521,63 @@ const Lampiran = {
       prog.innerHTML = '';
     };
     draw();
+  }
+};
+
+/* ───────────────────────── DOKUMEN KURIKULUM (buku petunjuk, silabus, dll.) ───────────────────────── */
+const Dokumen = {
+  /** Panel di halaman Kurikulum: dokumen umum (semua jenjang) + dokumen jenjang aktif. */
+  panel(jj) {
+    const adm = Store.isAdm();
+    const list = (S.d.dokumen || []).filter(d => !d.Jenjang || d.Jenjang === jj);
+    if (!list.length && !adm) return '';
+    return `<div class="card mb-3 dok-card"><div class="card-head" style="margin-bottom:${list.length ? 12 : 0}px"><div><div class="card-title"><i class="bi bi-book"></i> Dokumen & Buku Petunjuk</div>
+        <div class="card-sub">${list.length ? 'Panduan kurikulum yang bisa dibuka semua pengurus & guru.' : 'Unggah buku petunjuk kurikulum, silabus, atau tabel target (PDF, JPG, Excel).'}</div></div>
+        ${adm ? `<button class="btn btn-primary btn-sm" onclick="Dokumen.upload('${attr(jj)}')"><i class="bi bi-cloud-arrow-up"></i> Unggah Dokumen</button>` : ''}</div>
+      ${list.length ? `<div class="dok-list">${list.map(d => `<div class="dok-item"><i class="bi ${Lampiran.icon(d.Nama_File)}"></i>
+          <div class="grow"><a class="cell-strong" href="${attr(d.URL)}" target="_blank" rel="noopener">${esc(d.Judul)}</a><div class="cell-sub">${d.Jenjang ? esc(d.Jenjang) : 'Semua jenjang'} · ${esc(d.Nama_File)} · ${Lampiran.size(d.Ukuran)}</div></div>
+          <a class="btn btn-light btn-sm" href="${attr(d.URL)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right"></i> Buka</a>
+          ${adm && (!d.Jenjang || Store.jj().includes(d.Jenjang)) ? `<button class="icon-btn sm" aria-label="Hapus dokumen ${attr(d.Judul)}" onclick="Dokumen.remove('${attr(d.ID_Dokumen)}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>`).join('')}</div>` : ''}</div>`;
+  },
+  upload(jj) {
+    const m = UI.modal({ title: 'Unggah Dokumen Kurikulum', size: 'md',
+      body: `<form id="dokForm" class="form-grid" novalidate>
+        <label class="field"><span class="field-label">File <span class="req">*</span></span>
+          <label class="lamp-drop"><i class="bi bi-file-earmark-arrow-up"></i><div><b id="dokName">Pilih file</b><div class="tiny muted">PDF, JPG/PNG, Excel, Word, PowerPoint · maks. ${Lampiran.MB} MB</div></div>
+          <input type="file" id="dokFile" hidden accept="${Lampiran.EXT.map(e => '.' + e).join(',')}"></label></label>
+        <label class="field"><span class="field-label">Judul <span class="req">*</span></span><input class="input" name="Judul" maxlength="150" placeholder="mis. Buku Petunjuk Kurikulum KBM Generus 2025"></label>
+        <label class="field"><span class="field-label">Berlaku untuk</span><select class="select" name="Jenjang">${opt('', 'Semua jenjang', '')}${Store.jj().map(j => opt(j, j, '')).join('')}</select><span class="field-help">Pilih "Semua jenjang" untuk buku panduan umum.</span></label>
+        <div id="dokProg"></div><div id="dokErr" class="form-error" hidden></div></form>`,
+      foot: `<button class="btn btn-light" data-close>Batal</button><button class="btn btn-primary" id="dokGo"><i class="bi bi-cloud-upload"></i> Unggah</button>` });
+    const form = $('#dokForm', m.el), err = t => { const e = $('#dokErr', m.el); e.textContent = t || ''; e.hidden = !t; };
+    let file = null;
+    $('#dokFile', m.el).onchange = e => {
+      file = e.target.files[0] || null; err('');
+      $('#dokName', m.el).textContent = file ? file.name + ' (' + Lampiran.size(file.size) + ')' : 'Pilih file';
+      if (file && !form.Judul.value.trim()) form.Judul.value = file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim().slice(0, 150);
+    };
+    $('#dokGo', m.el).onclick = async ev => {
+      const judul = form.Judul.value.trim(), ext = file ? ((file.name.match(/\.([a-z0-9]+)$/i) || [])[1] || '').toLowerCase() : '';
+      if (!file) return err('Pilih file dulu.');
+      if (!Lampiran.EXT.includes(ext)) return err('Jenis file tidak didukung.');
+      if (file.size > Lampiran.MB * 1048576) return err(`Ukuran file maksimal ${Lampiran.MB} MB. Kecilkan dulu (mis. kompres PDF) lalu unggah lagi.`);
+      if (!judul) return err('Judul wajib diisi.');
+      const btn = ev.currentTarget; UI.busy(btn, true, 'Mengunggah…'); err('');
+      $('#dokProg', m.el).innerHTML = `<div class="note"><i class="bi bi-arrow-repeat spin-icon"></i><div>Mengunggah <b>${esc(file.name)}</b> (${Lampiran.size(file.size)}). File besar bisa memakan waktu 1–3 menit, jangan tutup halaman.</div></div>`;
+      try {
+        const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = () => rej(new Error('File tidak bisa dibaca.')); fr.readAsDataURL(file); });
+        const r = await API.run('apiUploadDokumen', { Judul: judul, Jenjang: form.Jenjang.value }, { name: file.name, type: file.type, data });
+        S.d.dokumen = [r].concat(S.d.dokumen || []); Store.persist();
+        m.close(); Router.render(); UI.toast('Dokumen "' + judul + '" terunggah.', 'ok');
+      } catch (x) { $('#dokProg', m.el).innerHTML = ''; err(x.message); UI.busy(btn, false); }
+    };
+  },
+  async remove(id) {
+    const d = (S.d.dokumen || []).find(x => x.ID_Dokumen === id); if (!d) return;
+    if (!(await UI.confirm(`Hapus dokumen <b>${esc(d.Judul)}</b>? File dipindahkan ke Sampah Google Drive.`, { ok: 'Hapus', danger: true }))) return;
+    const prev = S.d.dokumen.slice();
+    App.mutate({ apply: () => { S.d.dokumen = S.d.dokumen.filter(x => x.ID_Dokumen !== id); }, rollback: () => { S.d.dokumen = prev; },
+      call: () => API.run('apiHapusDokumen', id), okMsg: 'Dokumen dihapus.' }).catch(() => {});
   }
 };
 
@@ -1667,6 +1728,7 @@ Pages.kurikulum = {
       (canEks ? `<button class="btn btn-gold" onclick="Pages.kurikulum.materiForm(null, true)"><i class="bi bi-stars"></i> Tambah Ekstrakurikuler</button>` : '') +
       (Store.isAdm() ? `<button class="btn btn-light" onclick="KurImpor.open()"><i class="bi bi-file-earmark-arrow-up"></i> Impor Excel</button>` : '')) + `
       <div class="tabs" role="tablist">${Store.jj().map(j => `<button role="tab" aria-selected="${j === jj}" class="${j === jj ? 'active' : ''}" onclick="S.ui.kur.jenjang='${j}';Pages.kurikulum.render()">${esc(j)} <span class="badge ${j === jj ? 'b-ok' : 'b-outline'}">${S.d.materi.filter(m => m.Jenjang === j && (j !== 'Dewasa' || Store.inScope(m))).length}</span></button>`).join('')}</div>
+      ${Dokumen.panel(jj)}
       ${jj === 'Caberawit' ? `<div class="chips mb-3" role="tablist" aria-label="Filter kelas materi">
         <button class="chip ${kf === 'ALL' ? 'active' : ''}" onclick="S.ui.kur.kelas='ALL';Pages.kurikulum.render()"><i class="bi bi-mortarboard"></i> Semua Kelas <span class="count">${S.d.materi.filter(m => m.Jenjang === 'Caberawit').length}</span></button>
         ${KELAS.map(k => `<button class="chip ${kf === k ? 'active' : ''}" onclick="S.ui.kur.kelas='${k}';Pages.kurikulum.render()">Kelas ${k} <span class="count">${S.d.materi.filter(m => m.Jenjang === 'Caberawit' && (!m.Kelas || m.Kelas === k)).length}</span></button>`).join('')}</div>` : ''}
@@ -2679,14 +2741,17 @@ Pages.jumat = {
           <button class="icon-btn sm" aria-label="Kirim jadwal Jum'at ini via WhatsApp" title="Kirim via WA" onclick="Pages.jumat.wa(['${x.ID_Jumat}'])"><i class="bi bi-whatsapp" style="color:#25D366"></i></button>
           ${can ? `<button class="icon-btn sm" aria-label="Ubah jadwal" onclick="Pages.jumat.form('${x.ID_Jumat}')"><i class="bi bi-pencil"></i></button><button class="icon-btn sm" aria-label="Hapus jadwal" onclick="Pages.jumat.remove('${x.ID_Jumat}')"><i class="bi bi-trash3" style="color:var(--bad)"></i></button>` : ''}</div>
         <div class="jmt-roles"><div><small><i class="bi bi-mic"></i> Khotib</small><b>${esc(x.Khotib)}</b></div><div><small><i class="bi bi-person-standing"></i> Imam</small><b>${esc(x.Imam)}</b></div><div><small><i class="bi bi-megaphone"></i> Muadzin</small><b>${esc(x.Muadzin)}</b></div></div>
-        ${x.Keterangan ? `<div class="tiny muted mt-2"><i class="bi bi-info-circle"></i> ${esc(x.Keterangan)}</div>` : ''}</div>`; };
+        ${x.Keterangan ? `<div class="tiny muted mt-2"><i class="bi bi-info-circle"></i> ${esc(x.Keterangan)}</div>` : ''}
+        ${x.Tanggal <= t ? `<div class="jmt-infaq mt-2"><i class="bi bi-cash-coin"></i><div class="grow"><small>Infaq Jum'atan</small><b>${x.Infaq === '' || x.Infaq === undefined || x.Infaq === null ? '<span class="muted">Belum dicatat</span>' : esc(F.rp(x.Infaq))}</b></div>
+          ${Store.canInfaqJumat() ? `<button class="btn btn-soft btn-sm" onclick="Pages.jumat.infaq('${x.ID_Jumat}')"><i class="bi bi-pencil-square"></i> ${x.Infaq === '' || x.Infaq === undefined || x.Infaq === null ? 'Catat' : 'Ubah'}</button>` : ''}</div>` : ''}</div>`; };
+    const ymNow = D.ym(new Date()), infBln = S.d.jumat.filter(x => Store.inScope(x) && (f.kel === 'ALL' || x.ID_Kelompok === f.kel) && x.Tanggal.slice(0, 7) === ymNow && x.Infaq !== '' && x.Infaq !== undefined && x.Infaq !== null);
     $('#page-jumat').innerHTML = pageHead('Pembinaan <i class="bi bi-chevron-right"></i> <b>Jadwal Jum\'at</b>', "Jadwal Khotbah Jum'at",
       'Petugas Jum\'at per kelompok: khotib, imam salat, muadzin & waktu — bisa langsung dikirim via WhatsApp.',
       `<button class="btn btn-light" onclick="Pages.jumat.wa()"><i class="bi bi-whatsapp" style="color:#25D366"></i> Kirim via WA</button>${can ? `<button class="btn btn-primary" onclick="Pages.jumat.form()"><i class="bi bi-plus-lg"></i> Tambah Jadwal</button>` : ''}`) + `
       <div class="grid-3 section-gap">
         <div class="card kpi compact"><div class="kpi-label">Jum'at Terdekat</div><div class="kpi-icon"><i class="bi bi-moon-stars"></i></div><div class="kpi-value" style="font-size:20px">${esc(D.dayLong(nf).replace(/^Jumat, /, ''))}</div><div class="kpi-foot"><span>${nx.filter(x => x.Tanggal === nf).length ? nx.filter(x => x.Tanggal === nf).length + ' jadwal terisi' : '<span style="color:var(--warn-text)">Belum ada petugas</span>'}</span></div></div>
         <div class="card kpi compact"><div class="kpi-label">Jadwal Mendatang</div><div class="kpi-icon gold"><i class="bi bi-calendar-week"></i></div><div class="kpi-value">${nx.length}</div><div class="kpi-foot"><span>${nx.length ? 's.d. ' + esc(D.short(nx[nx.length - 1].Tanggal)) : 'Belum ada'}</span></div></div>
-        <div class="card kpi compact"><div class="kpi-label">Khotib Terjadwal</div><div class="kpi-icon"><i class="bi bi-mic"></i></div><div class="kpi-value">${new Set(nx.map(x => x.Khotib.toLowerCase())).size}</div><div class="kpi-foot"><span>orang berbeda</span></div></div>
+        <div class="card kpi compact"><div class="kpi-label">Infaq Jum'at ${esc(D.monthLabel(ymNow))}</div><div class="kpi-icon"><i class="bi bi-cash-coin"></i></div><div class="kpi-value" style="font-size:22px">${esc(F.rp(infBln.reduce((a, x) => a + (Number(x.Infaq) || 0), 0)))}</div><div class="kpi-foot"><span>${infBln.length} Jum'at tercatat</span></div></div>
       </div>
       <div class="card section-gap"><div class="toolbar">
         <select class="select" aria-label="Periode" onchange="S.ui.jmt.per=this.value;Pages.jumat.render()">${opt('next', 'Mendatang', f.per)}${opt('past', 'Sudah lewat', f.per)}<optgroup label="Per bulan">${months.map(m => opt(m, D.monthLabel(m), f.per)).join('')}</optgroup></select>
@@ -2737,6 +2802,34 @@ Pages.jumat = {
       }).catch(() => {});
     };
   },
+  /** Catat infaq Jum'atan (Penerobos Kelompok / Admin Kelompok). */
+  infaq(id) {
+    const x = S.d.jumat.find(r => r.ID_Jumat === id); if (!x) return;
+    const ada = x.Infaq !== '' && x.Infaq !== undefined && x.Infaq !== null;
+    const m = UI.modal({ title: "Infaq Jum'atan", size: 'sm',
+      body: `<div class="muted small mb-3">${esc(D.dayLong(x.Tanggal))} · ${esc(x.Tempat || Store.kelName(x.ID_Kelompok))}</div>
+        <label class="field"><span class="field-label">Jumlah infaq (IDR) <span class="req">*</span></span><div class="input-money"><span>Rp</span><input class="input" id="jiAmt" inputmode="numeric" placeholder="0" value="${ada ? F.num(x.Infaq) : ''}" oninput="this.value=this.value.replace(/[^\\d]/g,'').replace(/\\B(?=(\\d{3})+(?!\\d))/g,'.')"></div></label>
+        <div id="jiErr" class="form-error mt-2" hidden></div>`,
+      foot: `${ada ? '<button class="btn btn-light" id="jiDel" style="margin-right:auto"><i class="bi bi-trash3"></i> Hapus</button>' : ''}<button class="btn btn-light" data-close>Batal</button><button class="btn btn-primary" id="jiSave"><i class="bi bi-check-lg"></i> Simpan</button>` });
+    setTimeout(() => { const i = $('#jiAmt', m.el); if (i) i.focus(); }, 50);
+    const save = val => {
+      const prev = { Infaq: x.Infaq, Infaq_Oleh: x.Infaq_Oleh };
+      m.close();
+      App.mutate({
+        apply: () => { x.Infaq = val; },
+        rollback: () => { Object.assign(x, prev); },
+        call: () => API.run('apiSaveInfaqJumat', id, val),
+        onSaved: r => { Object.assign(x, r, { Infaq: r.Infaq === '' ? '' : Number(r.Infaq) || 0 }); },
+        okMsg: val === '' ? "Catatan infaq Jum'at dihapus." : "Infaq Jum'at " + D.short(x.Tanggal) + ' tersimpan: ' + F.rp(val) + '.'
+      }).catch(() => {});
+    };
+    $('#jiSave', m.el).onclick = () => {
+      const v = $('#jiAmt', m.el).value.replace(/[^\d]/g, '');
+      if (!v) { const e = $('#jiErr', m.el); e.textContent = 'Isi jumlah infaq (boleh 0).'; e.hidden = false; return; }
+      save(Number(v));
+    };
+    const del = $('#jiDel', m.el); if (del) del.onclick = () => save('');
+  },
   remove(id) {
     const x = S.d.jumat.find(r => r.ID_Jumat === id); if (!x) return;
     UI.confirm(`Hapus jadwal Jum'at <b>${esc(D.dayLong(x.Tanggal))}</b> (khotib ${esc(x.Khotib)})?`, { title: "Hapus Jadwal Jum'at", ok: 'Hapus' }).then(y => {
@@ -2748,7 +2841,7 @@ Pages.jumat = {
   text(list) {
     const by = new Map();
     list.slice().sort((a, b) => (a.ID_Kelompok + a.Tanggal + a.Waktu).localeCompare(b.ID_Kelompok + b.Tanggal + b.Waktu)).forEach(x => { if (!by.has(x.ID_Kelompok)) by.set(x.ID_Kelompok, []); by.get(x.ID_Kelompok).push(x); });
-    const out = ["*JADWAL KHOTBAH JUM'AT*", '_' + IdCard.org() + '_', ''];
+    const out = ["*JADWAL KHOTBAH JUM'AT*", ''];
     by.forEach((arr, kel) => {
       out.push('🏠 *Kelompok ' + Store.kelName(kel) + '*');
       arr.sort((a, b) => (a.Tanggal + a.Waktu).localeCompare(b.Tanggal + b.Waktu)).forEach(x => {
