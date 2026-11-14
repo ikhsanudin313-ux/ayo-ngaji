@@ -46,10 +46,52 @@ const PNRK_NAV = ['dashboard', 'jamaah', 'kegiatan', 'absensi', 'kehadiran', 'ju
 /** Jenjang yang punya No. HP pribadi jamaah (selain No. HP wali). */
 const JENJANG_HP = ['Pra Remaja', 'Remaja', 'Usia Nikah', 'Dewasa'];
 // Dapukan baku (jamaah boleh punya lebih dari satu, disimpan "994, MT")
-const DAPUKAN = ['994', 'Wakil 994', '995', 'Wakil 995', 'Penulis KU Kelompok', 'KU Kelompok', 'Penulis KU Desa', 'Penerobos Desa', 'Penerobos Kelompok',
+const DAPUKAN = ['994', 'Wakil 994', '995', 'Wakil 995', 'Penulis KU Kelompok', 'KU Kelompok', 'Penulis KU Desa', 'KU Desa', 'Penerobos Desa', 'Penerobos Kelompok',
   "Agnia' Desa", "Agnia' Kelompok", 'Mubalegh Desa', 'Mubalegh Kelompok', 'MT', 'MS', "Ro'yah"];
-const DAPUKAN_PENGURUS = DAPUKAN.slice(0, 13);
+const DAPUKAN_LAIN = ['MT', 'MS', "Ro'yah"];
+const DAPUKAN_PENGURUS = DAPUKAN.filter(d => !DAPUKAN_LAIN.includes(d));
 const dpkList = v => String(v || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean);
+/** Pemilih dapukan: dropdown (pengurus / lainnya / tulis manual) + chip terpilih yang bisa dihapus. */
+const DpkPick = {
+  html(curVal) {
+    const cur = dpkList(curVal);
+    return `<div class="dpk-sel"><div class="dpk-chosen" id="dpkChosen">${DpkPick.chips(cur)}</div>
+      <select class="select" id="dpkAdd" aria-label="Tambah dapukan">${DpkPick.options(cur)}</select>
+      <div class="dpk-manual" id="dpkManual" hidden><input class="input" id="dpkTxt" maxlength="40" placeholder="Tulis dapukan, mis. Bendahara Desa">
+        <button type="button" class="btn btn-primary" id="dpkTxtBtn"><i class="bi bi-plus-lg"></i> Tambah</button><button type="button" class="btn btn-light" id="dpkTxtX">Batal</button></div></div>`;
+  },
+  chips(cur) {
+    return cur.length ? cur.map(d => `<span class="dpk-chip"><input type="checkbox" name="DPK" value="${attr(d)}" checked hidden><i class="bi bi-award"></i>${esc(d)}<button type="button" aria-label="Hapus dapukan ${attr(d)}" data-dpk-x="${attr(d)}"><i class="bi bi-x"></i></button></span>`).join('')
+      : '<span class="muted small">Belum ada dapukan.</span>';
+  },
+  options(cur) {
+    const o = d => `<option value="${attr(d)}" ${cur.includes(d) ? 'disabled' : ''}>${esc(d)}${cur.includes(d) ? ' ✓' : ''}</option>`;
+    return `<option value="">+ Pilih dapukan…</option><optgroup label="Pengurus">${DAPUKAN_PENGURUS.map(o).join('')}</optgroup><optgroup label="Lainnya">${DAPUKAN_LAIN.map(o).join('')}</optgroup><option value="__manual">✎ Tulis manual…</option>`;
+  },
+  init(root) {
+    const sel = $('#dpkAdd', root), box = $('#dpkManual', root), txt = $('#dpkTxt', root);
+    if (!sel) return;
+    const cur = () => $$('[name=DPK]', root).map(x => x.value);
+    const draw = list => { $('#dpkChosen', root).innerHTML = DpkPick.chips(list); sel.innerHTML = DpkPick.options(list); sel.value = ''; };
+    const add = v => {
+      v = String(v || '').replace(/[,;<>]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!v) return;
+      const baku = DAPUKAN.find(d => d.toLowerCase() === v.toLowerCase()) || v, list = cur();
+      if (list.some(x => x.toLowerCase() === baku.toLowerCase())) { UI.toast('Dapukan "' + baku + '" sudah dipilih.', 'warn'); return; }
+      if (list.length >= 10) { UI.toast('Maksimal 10 dapukan.', 'warn'); return; }
+      draw(list.concat([baku]));
+    };
+    sel.addEventListener('change', () => {
+      if (sel.value === '__manual') { box.hidden = false; sel.value = ''; txt.focus(); return; }
+      add(sel.value);
+    });
+    const manualOk = () => { add(txt.value); txt.value = ''; box.hidden = true; };
+    $('#dpkTxtBtn', root).addEventListener('click', manualOk);
+    $('#dpkTxtX', root).addEventListener('click', () => { txt.value = ''; box.hidden = true; });
+    txt.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); manualOk(); } });
+    $('#dpkChosen', root).addEventListener('click', e => { const b = e.target.closest('[data-dpk-x]'); if (b) draw(cur().filter(x => x !== b.dataset.dpkX)); });
+  }
+};
 const dpkBadges = v => dpkList(v).map(d => `<span class="badge b-gold"><i class="bi bi-award"></i> ${esc(d)}</span>`).join(' ');
 // Jenis pengajian gabungan → peserta daftar absen
 const GAB_JENIS = [
@@ -1167,7 +1209,7 @@ Pages.jamaah = {
     if (!all.length) { // belum ada jamaah sama sekali: halaman dikosongkan (tanpa statistik & filter)
       $('#page-jamaah').innerHTML = pageHead('<i class="bi bi-database"></i> Master Data <i class="bi bi-chevron-right"></i> <b>Database Data Jamaah</b>',
         'Database Data Jamaah', `Kelola data jamaah terpusat dari ${JENJANG.length} jenjang pembinaan — ${esc(Store.scopeLabel())}.`,
-        `<button class="btn btn-primary no-guru" onclick="Pages.jamaah.form()"><i class="bi bi-person-plus"></i> Tambah Jamaah</button>`) +
+        `<button class="btn btn-light no-guru" onclick="JamImpor.open()"><i class="bi bi-file-earmark-arrow-up"></i> Impor Excel</button><button class="btn btn-primary no-guru" onclick="Pages.jamaah.form()"><i class="bi bi-person-plus"></i> Tambah Jamaah</button>`) +
         `<div class="card section-gap"><div class="empty" style="padding:56px 16px"><i class="bi bi-people"></i><div class="cell-strong mb-1">Belum ada data jamaah</div><div class="muted small mb-3">Data jamaah akan tampil di sini setelah ditambahkan.</div><button class="btn btn-primary no-guru" onclick="Pages.jamaah.form()"><i class="bi bi-person-plus"></i> Tambah Jamaah</button></div></div>`;
       return;
     }
@@ -1176,6 +1218,7 @@ Pages.jamaah = {
       'Database Data Jamaah', `Kelola data jamaah terpusat dari ${JENJANG.length} jenjang pembinaan — ${esc(Store.scopeLabel())}.`,
       `<button class="btn btn-light" onclick="Pages.jamaah.idcards()"><i class="bi bi-person-vcard"></i> Cetak ID Card</button>
        <button class="btn btn-light" onclick="Pages.jamaah.exportXlsx()"><i class="bi bi-download"></i> Ekspor Excel</button>
+       <button class="btn btn-light no-guru" onclick="JamImpor.open()"><i class="bi bi-file-earmark-arrow-up"></i> Impor Excel</button>
        <button class="btn btn-primary no-guru" onclick="Pages.jamaah.form()"><i class="bi bi-person-plus"></i> Tambah Jamaah</button>`,
       '<span class="badge b-mint"><i class="bi bi-patch-check"></i> Terverifikasi Terpusat</span>') + `
       <div class="grid-4">
@@ -1270,10 +1313,8 @@ Pages.jamaah = {
         <label class="field" id="kelasField" ${j && j.Jenjang === 'Caberawit' ? '' : 'hidden'}><span class="field-label">Kelas Caberawit</span><select class="select" name="Kelas">${opt('', '— Belum ditentukan —', j ? j.Kelas : '')}${KELAS.map(x => opt(x, 'Kelas ' + x, j ? j.Kelas : '')).join('')}</select><span class="field-help">Kelas A1–A6 khusus jenjang Caberawit.</span></label>
         <label class="field"><span class="field-label">Kelompok <span class="req">*</span></span>${master ? `<select class="select" name="ID_Kelompok" required>${kelOptions(defKel)}</select>` : `<input class="input" readonly value="${attr(Store.kelName(Store.myKel()))}">`}</label>
         <div class="field span-2"><span class="field-label">Dapukan <span class="tiny muted">(boleh lebih dari satu)</span></span>
-          <div class="dpk-pick">${(() => { const cur = dpkList(j ? j.Dapukan : ''), extra = cur.filter(x => !DAPUKAN.includes(x));
-            const box = d => `<label class="dpk-opt"><input type="checkbox" name="DPK" value="${attr(d)}" ${cur.includes(d) ? 'checked' : ''}><span>${esc(d)}</span></label>`;
-            return `<div class="dpk-grp"><small>Pengurus</small><div>${DAPUKAN_PENGURUS.map(box).join('')}</div></div><div class="dpk-grp"><small>Lainnya</small><div>${DAPUKAN.slice(13).concat(extra).map(box).join('')}</div></div>`; })()}</div>
-          <span class="field-help">Menentukan siapa yang masuk daftar absen Pengajian MT/MS dan Pengajian Pengurus.</span></div>
+          ${DpkPick.html(j ? j.Dapukan : '')}
+          <span class="field-help">Pilih dari daftar atau "Tulis manual". Dapukan Pengurus menentukan daftar absen Pengajian Pengurus; MT/MS untuk Pengajian MT/MS.</span></div>
         <label class="field"><span class="field-label">Nama wali / orang tua</span><input class="input" name="Nama_Wali" maxlength="120" placeholder="mis. Bpk. Suryanto, atau 'Mandiri'" value="${attr(j ? j.Nama_Wali : '')}"></label>
         <label class="field"><span class="field-label">No. HP wali / orang tua</span><input class="input" name="No_HP" inputmode="tel" maxlength="16" placeholder="08xxxxxxxxxx" value="${attr(j ? j.No_HP : '')}"></label>
         <label class="field span-2" id="hpJmField" ${j && JENJANG_HP.includes(j.Jenjang) ? '' : 'hidden'}><span class="field-label"><i class="bi bi-phone"></i> No. HP / WhatsApp jamaah</span><input class="input" name="No_HP_Jamaah" inputmode="tel" maxlength="16" placeholder="08xxxxxxxxxx" value="${attr(j ? (j.No_HP_Jamaah || '') : '')}"><span class="field-help">Untuk jenjang Pra Remaja, Remaja, Usia Nikah & Dewasa (nomor pribadi jamaah).</span></label>
@@ -1294,6 +1335,7 @@ Pages.jamaah = {
       $('#hpJmField', m.el).hidden = !JENJANG_HP.includes(jj);
     };
     form.Tanggal_Lahir.addEventListener('input', preview);
+    DpkPick.init(m.el);
     $('#jjManual', m.el).addEventListener('change', preview);
     $('#jjSelect', m.el).addEventListener('change', preview);
     $('#fFoto', m.el).addEventListener('change', async e => {
@@ -1320,7 +1362,7 @@ Pages.jamaah = {
       };
       rec.No_HP_Jamaah = JENJANG_HP.includes(rec.Jenjang) ? (fd.No_HP_Jamaah || '').replace(/[\s-]/g, '') : '';
       rec.Kelas = rec.Jenjang === 'Caberawit' ? (fd.Kelas || '') : '';
-      rec.Dapukan = $$('[name=DPK]:checked', m.el).map(x => x.value).join(', ');
+      rec.Dapukan = $$('[name=DPK]', m.el).map(x => x.value).join(', ');
       const dup = S.d.jamaah.find(x => x.ID_Jamaah !== rec.ID_Jamaah && x.Nama_Lengkap.toLowerCase() === rec.Nama_Lengkap.toLowerCase() && x.Tanggal_Lahir === rec.Tanggal_Lahir);
       const go = () => {
         m.close();
@@ -1578,6 +1620,142 @@ const Dokumen = {
     const prev = S.d.dokumen.slice();
     App.mutate({ apply: () => { S.d.dokumen = S.d.dokumen.filter(x => x.ID_Dokumen !== id); }, rollback: () => { S.d.dokumen = prev; },
       call: () => API.run('apiHapusDokumen', id), okMsg: 'Dokumen dihapus.' }).catch(() => {});
+  }
+};
+
+/* ───────────────────────── IMPOR JAMAAH DARI EXCEL ───────────────────────── */
+const JamImpor = {
+  KOLOM: ['ID_Jamaah', 'Nama_Lengkap', 'Jenis_Kelamin', 'Tanggal_Lahir', 'Tempat_Lahir', 'Kelompok', 'Kelas', 'Dapukan', 'Nama_Wali', 'No_HP', 'No_HP_Jamaah', 'Alamat', 'Jenjang', 'Status'],
+  WAJIB: ['Nama_Lengkap', 'Jenis_Kelamin', 'Tanggal_Lahir'],
+  multiKel() { return Store.allKel() || Store.guruSemua(); },
+  /** isi = true → berisi data jamaah saat ini (untuk diedit massal); false → template kosong + contoh. */
+  async template(btn, isi) {
+    UI.busy(btn, true, 'Menyiapkan…');
+    try {
+      await Excel.load();
+      const kelNm = id => Store.kelName(id);
+      const defKel = JamImpor.multiKel() ? ((S.d.kelompok[0] || {}).Nama_Kelompok || '') : kelNm(Store.myKel());
+      let rows = isi ? Store.jamaahScope(true).map(j => ({ ID_Jamaah: j.ID_Jamaah, Nama_Lengkap: j.Nama_Lengkap, Jenis_Kelamin: jkLabel(j.Jenis_Kelamin), Tanggal_Lahir: j.Tanggal_Lahir,
+          Tempat_Lahir: j.Tempat_Lahir || '', Kelompok: kelNm(j.ID_Kelompok), Kelas: j.Kelas || '', Dapukan: j.Dapukan || '', Nama_Wali: j.Nama_Wali || '', No_HP: j.No_HP || '',
+          No_HP_Jamaah: j.No_HP_Jamaah || '', Alamat: j.Alamat || '', Jenjang: j.Jenjang_Manual === 'Ya' ? j.Jenjang : '', Status: j.Status_Aktif })) : [];
+      if (!rows.length) rows = [
+        { ID_Jamaah: '', Nama_Lengkap: 'Ahmad Fauzan', Jenis_Kelamin: 'Laki-laki', Tanggal_Lahir: '2015-03-21', Tempat_Lahir: 'Ketapang', Kelompok: defKel, Kelas: 'A4', Dapukan: '', Nama_Wali: 'Bpk. Suryanto', No_HP: '081234567890', No_HP_Jamaah: '', Alamat: 'Jl. Merdeka No. 1', Jenjang: '', Status: 'Aktif' },
+        { ID_Jamaah: '', Nama_Lengkap: 'Siti Aminah', Jenis_Kelamin: 'Wanita', Tanggal_Lahir: '21/07/1990', Tempat_Lahir: 'Pontianak', Kelompok: defKel, Kelas: '', Dapukan: 'MT, KU Desa', Nama_Wali: 'Mandiri', No_HP: '', No_HP_Jamaah: '085712345678', Alamat: '', Jenjang: '', Status: 'Aktif' }];
+      const ws = XLSX.utils.json_to_sheet(rows, { header: JamImpor.KOLOM });
+      ws['!cols'] = [14, 26, 12, 13, 14, 20, 7, 22, 20, 15, 15, 30, 11, 9].map(w => ({ wch: w }));
+      // nomor HP & tanggal sebagai teks agar angka 0 di depan tidak hilang
+      Object.keys(ws).filter(a => /^[DJK]\d+$/.test(a) && a !== 'D1' && a !== 'J1' && a !== 'K1').forEach(a => { ws[a].t = 's'; ws[a].z = '@'; });
+      const P = [['PETUNJUK IMPOR JAMAAH AYO NGAJI'], [''],
+        ['Kolom wajib', 'Nama_Lengkap, Jenis_Kelamin (Laki-laki / Wanita), Tanggal_Lahir.'],
+        ['Tanggal_Lahir', 'Format 2015-03-21, 21/03/2015, atau 21 Maret 2015. Jenjang dihitung otomatis dari usia.'],
+        ['Kelompok', JamImpor.multiKel() ? 'Tulis persis seperti di sheet "Kelompok".' : 'Diabaikan — semua jamaah masuk kelompok Anda (' + kelNm(Store.myKel()) + ').'],
+        ['Kelas', 'Khusus Caberawit: A1–A6. Boleh kosong.'],
+        ['Dapukan', 'Boleh lebih dari satu, pisahkan dengan koma. mis. "994, MT". Boleh ditulis manual.'],
+        ['No_HP / No_HP_Jamaah', 'HP wali/orang tua dan HP jamaah (Pra Remaja ke atas). Tulis 08xxxxxxxxxx.'],
+        ['Jenjang', 'Kosongkan agar otomatis dari usia. Isi hanya bila ingin mengatur jenjang manual.'],
+        ['Status', 'Aktif atau Nonaktif (kosong = Aktif untuk jamaah baru).'],
+        ['ID_Jamaah', 'Kosongkan untuk jamaah baru. Isi ID yang ada untuk memperbarui data jamaah tersebut.'], [''],
+        ['Catatan', '• Impor aman diulang: jamaah dengan ID sama, atau nama + tanggal lahir + kelompok sama, akan diperbarui (tidak dobel).'],
+        ['', '• Bila ada satu baris salah, tidak ada data yang disimpan. Perbaiki baris yang disebutkan lalu impor lagi.'],
+        ['', '• Hapus 2 baris contoh sebelum mengisi data asli. Maksimal 2.000 jamaah per file.']];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Jamaah');
+      const wsP = XLSX.utils.aoa_to_sheet(P); wsP['!cols'] = [{ wch: 22 }, { wch: 110 }]; XLSX.utils.book_append_sheet(wb, wsP, 'Petunjuk');
+      if (JamImpor.multiKel()) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Nama_Kelompok', 'Desa / Daerah']].concat(S.d.kelompok.map(k => [k.Nama_Kelompok, k.Desa_Daerah || '']))), 'Kelompok');
+      XLSX.writeFile(wb, isi ? 'Data Jamaah Ayo Ngaji (untuk diedit).xlsx' : 'Template Impor Jamaah Ayo Ngaji.xlsx');
+    } catch (e) { UI.toast(e.message, 'bad'); }
+    UI.busy(btn, false);
+  },
+  /** Tanggal dari sel Excel (Date / nomor seri / teks) → yyyy-mm-dd (pemeriksaan akhir tetap di server). */
+  tgl(v) {
+    if (v instanceof Date && !isNaN(v)) { const d = new Date(v.getTime() + 12 * 3600e3); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    if (typeof v === 'number' && v > 1000 && v < 80000) { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 864e5); return d.toISOString().slice(0, 10); }
+    const t = String(v == null ? '' : v).trim();
+    const BLN = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+    let m, y, mo, d;
+    if ((m = t.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+    else if ((m = t.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/))) { d = +m[1]; mo = +m[2]; y = +m[3]; }
+    else if ((m = t.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/)) && BLN[m[2].slice(0, 3).toLowerCase()]) { d = +m[1]; mo = BLN[m[2].slice(0, 3).toLowerCase()]; y = +m[3]; }
+    else return t;
+    if (y < 100) y += y > new Date().getFullYear() % 100 ? 1900 : 2000;
+    return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  },
+  hp(v) { let s = String(v == null ? '' : v).replace(/[^\d+]/g, ''); if (/^8\d{7,12}$/.test(s)) s = '0' + s; return s; },
+  async parse(file) {
+    await Excel.load();
+    const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+    const norm = v => String(v).trim().toLowerCase().replace(/[\s_.]+/g, '');
+    const nm = wb.SheetNames.find(x => norm(x) === 'jamaah') || wb.SheetNames[0];
+    const alias = { nama: 'Nama_Lengkap', namalengkap: 'Nama_Lengkap', jk: 'Jenis_Kelamin', jeniskelamin: 'Jenis_Kelamin', tgllahir: 'Tanggal_Lahir', tanggallahir: 'Tanggal_Lahir',
+      tempatlahir: 'Tempat_Lahir', kelompok: 'Kelompok', namakelompok: 'Kelompok', kelas: 'Kelas', dapukan: 'Dapukan', namawali: 'Nama_Wali', wali: 'Nama_Wali', nohp: 'No_HP', hpwali: 'No_HP',
+      nohpwali: 'No_HP', nohpjamaah: 'No_HP_Jamaah', hpjamaah: 'No_HP_Jamaah', alamat: 'Alamat', jenjang: 'Jenjang', status: 'Status', idjamaah: 'ID_Jamaah', id: 'ID_Jamaah' };
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nm], { defval: '', raw: true }).map(r => {
+      const o = {}; Object.keys(r).forEach(k => { const c = alias[norm(k)]; if (c) o[c] = r[k]; });
+      Object.keys(o).forEach(k => { o[k] = k === 'Tanggal_Lahir' ? JamImpor.tgl(o[k]) : (k === 'No_HP' || k === 'No_HP_Jamaah') ? JamImpor.hp(o[k]) : String(o[k] == null ? '' : o[k]).trim(); });
+      return o;
+    }).filter(o => Object.values(o).some(Boolean));
+    if (rows.length && !('Nama_Lengkap' in rows[0])) throw new Error('Kolom "Nama_Lengkap" tidak ditemukan. Gunakan template dari tombol Unduh Template.');
+    return rows;
+  },
+  /** Pemeriksaan cepat di perangkat sebelum dikirim (server tetap memeriksa ulang semuanya). */
+  check(rows) {
+    const errs = [], jk = v => /^(l|p|w|laki|laki-laki|laki laki|pria|wanita|perempuan|ikhwan|akhwat)$/i.test(String(v).trim());
+    const kelOk = v => S.d.kelompok.some(k => k.ID_Kelompok === v || k.Nama_Kelompok.trim().toLowerCase() === String(v).trim().toLowerCase().replace(/\s+/g, ' '));
+    rows.forEach((r, i) => {
+      const b = `Baris ${i + 2}${r.Nama_Lengkap ? ' (' + r.Nama_Lengkap + ')' : ''}: `;
+      if (!r.Nama_Lengkap) errs.push(b + 'nama wajib diisi.');
+      else if (!jk(r.Jenis_Kelamin)) errs.push(b + 'jenis kelamin harus Laki-laki atau Wanita.');
+      else if (!r.Tanggal_Lahir) errs.push(b + 'tanggal lahir wajib diisi.');
+      else if (JamImpor.multiKel() && !kelOk(r.Kelompok)) errs.push(b + `kelompok "${r.Kelompok}" tidak ditemukan.`);
+    });
+    return errs;
+  },
+  open() {
+    let rows = null;
+    const m = UI.modal({
+      title: 'Impor Jamaah dari Excel', size: 'lg',
+      body: `<ol class="steps-list">
+          <li><b>Unduh template</b>, isi satu baris per jamaah (kolom wajib: Nama, Jenis Kelamin, Tanggal Lahir).
+            <div class="mt-2 row-wrap" style="gap:8px"><button class="btn btn-light btn-sm" id="jiTpl"><i class="bi bi-download"></i> Unduh Template Excel</button>
+            ${Store.jamaahScope(true).length ? '<button class="btn btn-light btn-sm" id="jiData"><i class="bi bi-pencil-square"></i> Unduh Data Saat Ini (untuk diedit massal)</button>' : ''}</div></li>
+          <li class="mt-3"><b>Pilih file</b> yang sudah diisi. Data diperiksa dulu sebelum disimpan.
+            <label class="lamp-drop mt-2"><i class="bi bi-file-earmark-spreadsheet"></i><div><b id="jiName">Pilih file .xlsx / .xls / .csv</b><div class="tiny muted">${JamImpor.multiKel() ? 'Kolom Kelompok wajib diisi sesuai nama kelompok' : 'Semua jamaah masuk kelompok ' + esc(Store.kelName(Store.myKel()))} · jenjang dihitung otomatis dari usia</div></div>
+            <input type="file" id="jiFile" accept=".xlsx,.xls,.csv" hidden></label></li></ol>
+        <div id="jiPrev" class="mt-3"></div><div id="jiErr" class="form-error mt-2" style="white-space:pre-line" hidden></div>`,
+      foot: '<button class="btn btn-light" data-close>Batal</button><button class="btn btn-primary" id="jiGo" disabled><i class="bi bi-cloud-upload"></i> Impor Sekarang</button>'
+    });
+    const err = t => { const e = $('#jiErr', m.el); e.textContent = t || ''; e.hidden = !t; };
+    $('#jiTpl', m.el).onclick = e => JamImpor.template(e.currentTarget, false);
+    const bd = $('#jiData', m.el); if (bd) bd.onclick = e => JamImpor.template(e.currentTarget, true);
+    $('#jiFile', m.el).onchange = async e => {
+      const f = e.target.files[0]; if (!f) return; e.target.value = '';
+      $('#jiName', m.el).textContent = f.name; err(''); rows = null; $('#jiGo', m.el).disabled = true;
+      $('#jiPrev', m.el).innerHTML = '<div class="note"><i class="bi bi-arrow-repeat spin-icon"></i><div>Membaca file…</div></div>';
+      try {
+        const data = await JamImpor.parse(f);
+        if (!data.length) { $('#jiPrev', m.el).innerHTML = ''; return err('File tidak berisi baris data.'); }
+        const ids = new Set(S.d.jamaah.map(j => j.ID_Jamaah));
+        const kelId = v => { const k = S.d.kelompok.find(k => k.ID_Kelompok === v || k.Nama_Kelompok.trim().toLowerCase() === String(v).trim().toLowerCase()); return k ? k.ID_Kelompok : ''; };
+        const ada = new Set(S.d.jamaah.map(j => j.Nama_Lengkap.trim().toLowerCase() + '|' + j.Tanggal_Lahir + '|' + j.ID_Kelompok));
+        const upd = data.filter(r => (r.ID_Jamaah && ids.has(r.ID_Jamaah.toUpperCase())) || ada.has(String(r.Nama_Lengkap).trim().toLowerCase() + '|' + r.Tanggal_Lahir + '|' + (JamImpor.multiKel() ? kelId(r.Kelompok) : Store.myKel()))).length;
+        const perJ = {}; data.forEach(r => { const j = r.Jenjang || (/^\d{4}-\d{2}-\d{2}$/.test(r.Tanggal_Lahir) ? computeJenjang(r.Tanggal_Lahir, S.d.settings.usia) : ''); if (j) perJ[j] = (perJ[j] || 0) + 1; });
+        $('#jiPrev', m.el).innerHTML = `<div class="grid-2"><div class="card kpi compact"><div class="kpi-label">Jamaah di file</div><div class="kpi-value">${data.length}</div><div class="kpi-foot"><span>${data.length - upd} baru · ${upd} diperbarui</span></div></div>
+          <div class="card kpi compact"><div class="kpi-label">Perkiraan jenjang</div><div class="kpi-foot" style="border:0;margin-top:6px"><span>${JENJANG.filter(j => perJ[j]).map(j => esc(j) + ' ' + perJ[j]).join(' · ') || '–'}</span></div></div></div>`;
+        const salah = JamImpor.check(data);
+        if (salah.length) return err('Perbaiki dulu di file:\n• ' + salah.slice(0, 10).join('\n• ') + (salah.length > 10 ? `\n• …dan ${salah.length - 10} lainnya` : ''));
+        rows = data; $('#jiGo', m.el).disabled = false;
+      } catch (x) { $('#jiPrev', m.el).innerHTML = ''; err(x.message); }
+    };
+    $('#jiGo', m.el).onclick = async e => {
+      if (!rows) return;
+      const btn = e.currentTarget; UI.busy(btn, true, 'Mengimpor ' + rows.length + ' jamaah…'); err('');
+      try {
+        const r = await API.run('apiImportJamaah', rows);
+        r.jamaah.forEach(x => Store.upsert('jamaah', x, 'ID_Jamaah'));
+        Store.index(); Store.persist(); m.close(); Router.render();
+        UI.toast(`Impor selesai: ${r.baru} jamaah baru, ${r.ubah} diperbarui.`, 'ok');
+      } catch (x) { err(x.message); UI.busy(btn, false); }
+    };
   }
 };
 
